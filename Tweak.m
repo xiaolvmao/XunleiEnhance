@@ -518,7 +518,7 @@ static NSArray *XEPanelSpec(void) {
                ] },
 
             @{ @"title": @"「我的」页净化",
-               @"footer": @"按板块整块隐掉：会员/充值推广、游戏中心、运营 banner 与推荐位。云盘、离线、分享、设置这些功能入口不动。",
+               @"footer": @"按板块整块隐掉：会员/充值推广、游戏中心、运营 banner 与推荐位。只对「我的」页生效，云盘、离线、分享、设置这些功能入口不动。",
                @"items": @[
                    @{ @"key": @"hideMineVip", @"title": @"隐藏会员 / 充值推广" },
                    @{ @"key": @"hideMineGame", @"title": @"隐藏游戏中心" },
@@ -822,19 +822,40 @@ static BOOL XEMineCleanWanted(void) {
     return XE_HideMineVip() || XE_HideMineGame() || XE_HideMinePromo();
 }
 
+// 只对「我的」页生效：购买页 / 会员页里同名的 VIP 组件必须留着，
+// 否则会把功能页也一起弄坏。顺着 superview → nextResponder 找到所属 VC，
+// 类名带 PersonalCenter / Mine 才算。
+// 这个链只在类名命中时才走（命中很少），平时零成本。
+static BOOL XEViewOnMinePage(UIView *v) {
+    for (UIView *p = v; p; p = p.superview) {
+        id responder = [p nextResponder];
+        if (![responder isKindOfClass:[UIViewController class]]) continue;
+        UIViewController *vc = (UIViewController *)responder;
+        if ([vc.title isEqualToString:@"我的"]) return YES;
+        const char *name = class_getName([responder class]);
+        if (!name) return NO;
+        return (strstr(name, "PersonalCenter") || strstr(name, "Mine")) ? YES : NO;
+    }
+    return NO;
+}
+
 static BOOL XEShouldHideView(UIView *v) {
     if (!v) return NO;
 
     // 先看类名（走指针缓存，几乎零成本），不是推广组件就立刻返回，
     // 不读偏好，也不碰任何 OC 对象。
     XECleanKind kind = XECleanKindForClass(object_getClass(v));
+    if (kind == XECleanNone) return NO;
+
+    BOOL want = NO;
     switch (kind) {
-        case XECleanVip:   return XE_HideMineVip();
-        case XECleanGame:  return XE_HideMineGame();
-        case XECleanPromo: return XE_HideMinePromo();
-        case XECleanNone:  break;
+        case XECleanVip:   want = XE_HideMineVip();   break;
+        case XECleanGame:  want = XE_HideMineGame();  break;
+        case XECleanPromo: want = XE_HideMinePromo(); break;
+        case XECleanNone:  return NO;
     }
-    return NO;
+    if (!want) return NO;
+    return XEViewOnMinePage(v);
 }
 
 static void XEHideMineBlock(UIView *v) {
@@ -1048,9 +1069,10 @@ static void XEProbeTick(void) {
     if (isSettings) XEAttachEntryTo(top);
 
     // 「我的」页：新进来的板块由 addSubview hook 拦，这里补一次全量扫（异步加载的）
-    if (XEMineCleanWanted() &&
-        ([cls rangeOfString:@"PersonalCenter" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-         [cls rangeOfString:@"Mine" options:NSCaseInsensitiveSearch].location != NSNotFound)) {
+    BOOL isMine = [cls rangeOfString:@"PersonalCenter" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                  [cls rangeOfString:@"Mine" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                  [top.title isEqualToString:@"我的"];
+    if (XEMineCleanWanted() && isMine) {
         if (++gXEMineTicks % 4 == 1) XESweepMineView(top.view, 0);
     }
 }
