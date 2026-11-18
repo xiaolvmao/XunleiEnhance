@@ -3,6 +3,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <objc/runtime.h>
 #import <dispatch/dispatch.h>
+#include <string.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  迅雷增强 / XunleiEnhance
@@ -19,7 +20,7 @@
 
 #define XE_PREF_DOMAIN_STR "com.xunlei.mvideo.xunleienhance"
 #define XE_NOTIFY_STR "com.xiaolvmao.xunleienhance/reload"
-#define XE_VERSION @"1.1.0"
+#define XE_VERSION @"2.0.0"
 
 static NSDictionary *gXEPrefs = nil;
 
@@ -54,6 +55,9 @@ static NSDictionary *XEDefaults(void) {
             @"disableShake": @YES,
             @"limitAutoJump": @YES,
             @"debugLog": @NO,
+            // 入口相关
+            @"floatingEntry": @YES,   // 悬浮球（不依赖 App 任何页面结构）
+            @"showBeacon": @YES,      // 每次升级后首次启动弹一次「已注入」
         };
     });
     return d;
@@ -409,7 +413,14 @@ static NSInteger gXEHookTotal = 0;
 
 static char kXESwitchKey;   // 关联对象 key
 
+// 下面这几个由「入口」段实现，面板里要用，先声明
+static NSString *XEDiagValue(NSString *kind);
+static NSString *XEDiagReport(void);
+static BOOL XEFloatVisible(void);
+static void XEInstallFloatingEntry(void);
+
 @interface XESettingsController : UITableViewController
+- (void)xe_toast:(NSString *)text;
 @end
 
 static NSArray *XEPanelSpec(void) {
@@ -442,9 +453,27 @@ static NSArray *XEPanelSpec(void) {
                    @{ @"key": @"limitAutoJump", @"title": @"限制广告自动跳转" },
                ] },
 
+            @{ @"title": @"入口",
+               @"footer": @"悬浮齿轮挂在 App 窗口上，不依赖任何页面结构，版本更新也不会失效；关掉后仍可从 我的 → 设置 → 列表最后一行进入。",
+               @"items": @[
+                   @{ @"key": @"floatingEntry", @"title": @"显示悬浮入口" },
+                   @{ @"key": @"showBeacon", @"title": @"升级后提示已生效" },
+               ] },
+
             @{ @"title": @"调试",
                @"footer": @"把 [XunleiEnhance] 日志打到控制台（Console / idevicesyslog）。",
                @"items": @[ @{ @"key": @"debugLog", @"title": @"输出调试日志" } ] },
+
+            @{ @"title": @"诊断",
+               @"footer": @"入口不出现时，把这段信息发出来就能定位是哪一环断了。",
+               @"items": @[
+                   @{ @"info": @"version", @"title": @"版本" },
+                   @{ @"info": @"hooks", @"title": @"Hook 安装" },
+                   @{ @"info": @"float", @"title": @"悬浮入口" },
+                   @{ @"info": @"classes", @"title": @"设置页入口" },
+                   @{ @"info": @"hits", @"title": @"设置页控制次数" },
+                   @{ @"action": @"copydiag", @"title": @"复制诊断信息" },
+               ] },
 
             @{ @"title": @"",
                @"footer": @"",
@@ -511,6 +540,23 @@ static NSArray *XEPanelSpec(void) {
     NSArray *spec = [self xe_spec];
     NSDictionary *item = spec[indexPath.section][@"items"][indexPath.row];
 
+    if (item[@"info"]) {
+        static NSString *rid = @"XEInfoCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:rid];
+        if (!cell) {
+            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1
+                                         reuseIdentifier:rid];
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            cell.textLabel.font = [UIFont systemFontOfSize:14];
+            cell.detailTextLabel.font = [UIFont monospacedDigitSystemFontOfSize:13
+                                                                        weight:UIFontWeightRegular];
+            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+        }
+        cell.textLabel.text = item[@"title"];
+        cell.detailTextLabel.text = XEDiagValue(item[@"info"]);
+        return cell;
+    }
+
     if (item[@"action"]) {
         static NSString *rid = @"XEActionCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:rid];
@@ -550,6 +596,12 @@ static NSArray *XEPanelSpec(void) {
 - (void)xe_switchChanged:(UISwitch *)sw {
     NSString *key = objc_getAssociatedObject(sw, &kXESwitchKey);
     if (key) XESavePref(key, @(sw.isOn));
+    if ([key isEqualToString:@"floatingEntry"]) {
+        XEInstallFloatingEntry();
+    }
+    if ([key isEqualToString:@"showBeacon"]) {
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"xeBeaconVersion"];
+    }
     if ([key isEqualToString:@"enabled"]) {
         [self.tableView reloadData];
     }
@@ -559,12 +611,23 @@ static NSArray *XEPanelSpec(void) {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     NSArray *spec = [self xe_spec];
     NSDictionary *item = spec[indexPath.section][@"items"][indexPath.row];
-    if (!item[@"action"]) return;
+    NSString *action = item[@"action"];
+    if (!action) return;
+
+    if ([action isEqualToString:@"copydiag"]) {
+        [[UIPasteboard generalPasteboard] setString:XEDiagReport()];
+        [self xe_toast:@"诊断信息已复制"];
+        return;
+    }
 
     XEResetPrefs();
     [tableView reloadData];
+    XEInstallFloatingEntry();
+    [self xe_toast:@"已恢复默认设置"];
+}
 
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"已恢复默认设置"
+- (void)xe_toast:(NSString *)text {
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:text
                                                               message:nil
                                                        preferredStyle:UIAlertControllerStyleAlert];
     [self presentViewController:ac animated:YES completion:^{
@@ -592,44 +655,76 @@ static void XEShowSettingsFrom(UIViewController *from) {
     [from presentViewController:wrapper animated:YES completion:nil];
 }
 
-#pragma mark - 设置页入口：往迅雷设置列表末尾追加一行
-// 只碰「多出来那一行」的 6 个索引路径方法，其余原样转发给原实现，
-// 所以不会打乱迅雷自己的分组与行序。
-
-static Class xe_entryClass = Nil;
-static NSInteger (*xe_orig_rowCount)(id, SEL, UITableView *, NSInteger);
-static UITableViewCell *(*xe_orig_cellForRow)(id, SEL, UITableView *, NSIndexPath *);
-static void (*xe_orig_didSelectRow)(id, SEL, UITableView *, NSIndexPath *);
-static double (*xe_orig_rowHeight)(id, SEL, UITableView *, NSIndexPath *);
-static BOOL (*xe_orig_canEditRow)(id, SEL, UITableView *, NSIndexPath *);
-static id (*xe_orig_swipeActions)(id, SEL, UITableView *, NSIndexPath *);
+#pragma mark - 入口一：往迅雷设置列表末尾追加一行
+// 只碰「多出来那一行」的 6 个索引路径方法，其余原样转发给原实现。
+// 按类分表存 orig：同一个版本里可能存在多个设置页，各类的实现指针不能串台。
 
 #define XE_ENTRY_TITLE @"迅雷增强"
+#define XE_MAX_ENTRY_CLASSES 6
 
-// 追加到设置的「最后一段」末尾，视觉上就是列表最后一行
+typedef struct {
+    Class cls;
+    IMP rows;
+    IMP cell;
+    IMP didSelect;
+    IMP height;
+    IMP canEdit;
+    IMP swipe;
+} XEEntryOrig;
+
+static XEEntryOrig gXEEntry[XE_MAX_ENTRY_CLASSES];
+static int gXEEntryCount = 0;
+static NSMutableArray<NSString *> *gXEEntryNames = nil;   // 诊断用
+static long gXESettingsHits = 0;                         // 设置页 hook 命中次数
+
+static XEEntryOrig *XEEntryFor(id self) {
+    for (Class c = object_getClass(self); c; c = class_getSuperclass(c)) {
+        for (int i = 0; i < gXEEntryCount; i++) {
+            if (gXEEntry[i].cls == c) return &gXEEntry[i];
+        }
+    }
+    return NULL;
+}
+
+// 追加到「最后一段」末尾，视觉上就是列表最后一行
 static NSInteger XEEntrySection(UITableView *tv) {
     NSInteger n = (NSInteger)[tv numberOfSections];
     return n > 0 ? n - 1 : 0;
 }
 
-static NSInteger XEAppRowCount(id self, UITableView *tv) {
-    if (!xe_orig_rowCount) return 0;
-    return xe_orig_rowCount(self, @selector(tableView:numberOfRowsInSection:),
-                            tv, XEEntrySection(tv));
+static NSInteger XECallRows(XEEntryOrig *o, id self, SEL _cmd, UITableView *tv, NSInteger section) {
+    if (!o || !o->rows) return 0;
+    return ((NSInteger (*)(id, SEL, UITableView *, NSInteger))o->rows)(self, _cmd, tv, section);
 }
 
-static BOOL XEIsEntryRow(id self, UITableView *tv, NSIndexPath *ip) {
-    if (!ip || ip.section != XEEntrySection(tv)) return NO;
-    return ip.row == XEAppRowCount(self, tv);
+static NSInteger XEAppRowCount(XEEntryOrig *o, id self, UITableView *tv) {
+    return XECallRows(o, self, @selector(tableView:numberOfRowsInSection:), tv, XEEntrySection(tv));
+}
+
+static BOOL XEIsEntryRow(XEEntryOrig *o, id self, UITableView *tv, NSIndexPath *ip) {
+    if (!o || !ip) return NO;
+    if (ip.section != XEEntrySection(tv)) return NO;
+    return ip.row == XEAppRowCount(o, self, tv);
 }
 
 static NSInteger xe_rowCount(id self, SEL _cmd, UITableView *tv, NSInteger section) {
-    NSInteger n = xe_orig_rowCount(self, _cmd, tv, section);
+    XEEntryOrig *o = XEEntryFor(self);
+    NSInteger n = XECallRows(o, self, _cmd, tv, section);
+    if (!o) return n;
+    gXESettingsHits++;
     return (section == XEEntrySection(tv)) ? n + 1 : n;
 }
 
 static UITableViewCell *xe_cellForRow(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (!XEIsEntryRow(self, tv, ip)) return xe_orig_cellForRow(self, _cmd, tv, ip);
+    XEEntryOrig *o = XEEntryFor(self);
+    if (!XEIsEntryRow(o, self, tv, ip)) {
+        if (o && o->cell) {
+            return ((UITableViewCell *(*)(id, SEL, UITableView *, NSIndexPath *))o->cell)
+                (self, _cmd, tv, ip);
+        }
+        return [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                      reuseIdentifier:nil];
+    }
 
     static NSString *rid = @"XunleiEnhanceEntry";
     UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:rid];
@@ -644,69 +739,106 @@ static UITableViewCell *xe_cellForRow(id self, SEL _cmd, UITableView *tv, NSInde
 }
 
 static void xe_didSelectRow(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (!XEIsEntryRow(self, tv, ip)) {
-        xe_orig_didSelectRow(self, _cmd, tv, ip);
+    XEEntryOrig *o = XEEntryFor(self);
+    if (!XEIsEntryRow(o, self, tv, ip)) {
+        if (o && o->didSelect) {
+            ((void (*)(id, SEL, UITableView *, NSIndexPath *))o->didSelect)(self, _cmd, tv, ip);
+        }
         return;
     }
     [tv deselectRowAtIndexPath:ip animated:YES];
-    XELog(@"open enhance settings panel");
+    XELog(@"open enhance panel from settings row");
     XEShowSettingsFrom(self);
 }
 
 static double xe_rowHeight(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (!XEIsEntryRow(self, tv, ip)) return xe_orig_rowHeight(self, _cmd, tv, ip);
+    XEEntryOrig *o = XEEntryFor(self);
+    if (!XEIsEntryRow(o, self, tv, ip)) {
+        if (o && o->height) {
+            return ((double (*)(id, SEL, UITableView *, NSIndexPath *))o->height)
+                (self, _cmd, tv, ip);
+        }
+        return UITableViewAutomaticDimension;
+    }
     NSInteger sec = XEEntrySection(tv);
-    NSInteger rows = xe_orig_rowCount(self, @selector(tableView:numberOfRowsInSection:), tv, sec);
-    if (rows <= 0) return 54;   // 空段别去问原实现，免得索引越界
-    double h = xe_orig_rowHeight(self, _cmd, tv,
-                                [NSIndexPath indexPathForRow:0 inSection:sec]);
-    // -1 是 UITableViewAutomaticDimension，说明按约束自适应，给个固定值更稳
+    NSInteger rows = XECallRows(o, self, @selector(tableView:numberOfRowsInSection:), tv, sec);
+    double h = 0;
+    if (o && o->height && rows > 0) {
+        // 复用该段首行高度，看起来跟原生行一致；空段不要问原实现（会越界）
+        h = ((double (*)(id, SEL, UITableView *, NSIndexPath *))o->height)(
+            self, _cmd, tv, [NSIndexPath indexPathForRow:0 inSection:sec]);
+    }
     if (!(h > 30) || h > 100) h = 54;
     return h;
 }
 
 static BOOL xe_canEditRow(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (XEIsEntryRow(self, tv, ip)) return NO;
-    return xe_orig_canEditRow(self, _cmd, tv, ip);
+    XEEntryOrig *o = XEEntryFor(self);
+    if (XEIsEntryRow(o, self, tv, ip)) return NO;
+    if (o && o->canEdit) {
+        return ((BOOL (*)(id, SEL, UITableView *, NSIndexPath *))o->canEdit)(self, _cmd, tv, ip);
+    }
+    return NO;
 }
 
 static id xe_swipeActions(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (XEIsEntryRow(self, tv, ip)) return nil;
-    return xe_orig_swipeActions(self, _cmd, tv, ip);
-}
-
-static int XEInstallEntryHooksOn(Class cls) {
-    if (!cls) return 0;
-    if (xe_orig_rowCount && cls != xe_entryClass) return 0;   // 只挂一个类，避免 orig 串台
-    int n = 0;
-    if (XEInstallOn(cls, "tableView:numberOfRowsInSection:",
-                    (IMP)xe_rowCount, (IMP *)&xe_orig_rowCount)) n++;
-    if (XEInstallOn(cls, "tableView:cellForRowAtIndexPath:",
-                    (IMP)xe_cellForRow, (IMP *)&xe_orig_cellForRow)) n++;
-    if (XEInstallOn(cls, "tableView:didSelectRowAtIndexPath:",
-                    (IMP)xe_didSelectRow, (IMP *)&xe_orig_didSelectRow)) n++;
-    if (XEInstallOn(cls, "tableView:heightForRowAtIndexPath:",
-                    (IMP)xe_rowHeight, (IMP *)&xe_orig_rowHeight)) n++;
-    if (XEInstallOn(cls, "tableView:canEditRowAtIndexPath:",
-                    (IMP)xe_canEditRow, (IMP *)&xe_orig_canEditRow)) n++;
-    if (XEInstallOn(cls, "tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:",
-                    (IMP)xe_swipeActions, (IMP *)&xe_orig_swipeActions)) n++;
-    if (n > 0) { xe_entryClass = cls; }
-    return n;
-}
-
-static BOOL XEClassHasEntrySelectors(Class cls) {
-    static const char *sels[] = {
-        "tableView:numberOfRowsInSection:",
-        "tableView:cellForRowAtIndexPath:",
-        "tableView:didSelectRowAtIndexPath:",
-        "tableView:heightForRowAtIndexPath:",
-        "tableView:canEditRowAtIndexPath:",
-        "tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:",
-    };
-    for (int i = 0; i < (int)(sizeof(sels) / sizeof(sels[0])); i++) {
-        if (!class_getInstanceMethod(cls, sel_registerName(sels[i]))) return NO;
+    XEEntryOrig *o = XEEntryFor(self);
+    if (XEIsEntryRow(o, self, tv, ip)) return nil;
+    if (o && o->swipe) {
+        return ((id (*)(id, SEL, UITableView *, NSIndexPath *))o->swipe)(self, _cmd, tv, ip);
     }
+    return nil;
+}
+
+#pragma mark 挂载
+
+static BOOL XEClassOwnsSelector(Class cls, SEL sel) {
+    unsigned int n = 0;
+    Method *ms = class_copyMethodList(cls, &n);
+    BOOL found = NO;
+    for (unsigned int i = 0; i < n; i++) {
+        if (method_getName(ms[i]) == sel) { found = YES; break; }
+    }
+    if (ms) free(ms);
+    return found;
+}
+
+// 只有类「自己实现」了这三个核心方法才挂：否则说明列表数据源在别的对象上，
+// 挂在 VC 上永远收不到回调（这正是上一版入口不出现的典型原因之一）。
+static BOOL XEAddEntryClass(Class cls) {
+    if (!cls || gXEEntryCount >= XE_MAX_ENTRY_CLASSES) return NO;
+    for (int i = 0; i < gXEEntryCount; i++) {
+        if (gXEEntry[i].cls == cls) return NO;
+    }
+    if (!XEClassOwnsSelector(cls, @selector(tableView:numberOfRowsInSection:))) return NO;
+    if (!XEClassOwnsSelector(cls, @selector(tableView:cellForRowAtIndexPath:))) return NO;
+    if (!XEClassOwnsSelector(cls, @selector(tableView:didSelectRowAtIndexPath:))) return NO;
+
+    XEEntryOrig *o = &gXEEntry[gXEEntryCount];
+    memset(o, 0, sizeof(*o));
+    o->cls = cls;
+
+    Method m;
+    if ((m = class_getInstanceMethod(cls, @selector(tableView:numberOfRowsInSection:))))
+        o->rows = method_setImplementation(m, (IMP)xe_rowCount);
+    if ((m = class_getInstanceMethod(cls, @selector(tableView:cellForRowAtIndexPath:))))
+        o->cell = method_setImplementation(m, (IMP)xe_cellForRow);
+    if ((m = class_getInstanceMethod(cls, @selector(tableView:didSelectRowAtIndexPath:))))
+        o->didSelect = method_setImplementation(m, (IMP)xe_didSelectRow);
+    if (XEClassOwnsSelector(cls, @selector(tableView:heightForRowAtIndexPath:)) &&
+        (m = class_getInstanceMethod(cls, @selector(tableView:heightForRowAtIndexPath:))))
+        o->height = method_setImplementation(m, (IMP)xe_rowHeight);
+    if (XEClassOwnsSelector(cls, @selector(tableView:canEditRowAtIndexPath:)) &&
+        (m = class_getInstanceMethod(cls, @selector(tableView:canEditRowAtIndexPath:))))
+        o->canEdit = method_setImplementation(m, (IMP)xe_canEditRow);
+    if (XEClassOwnsSelector(cls, @selector(tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:)) &&
+        (m = class_getInstanceMethod(cls, @selector(tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:))))
+        o->swipe = method_setImplementation(m, (IMP)xe_swipeActions);
+
+    gXEEntryCount++;
+    if (!gXEEntryNames) gXEEntryNames = [NSMutableArray array];
+    NSString *cname = [NSString stringWithUTF8String:class_getName(cls)];
+    [gXEEntryNames addObject:cname ?: @"?"];
     return YES;
 }
 
@@ -715,17 +847,19 @@ static const char *kXESettingsClassNames[] = {
 };
 
 static void XEInstallSettingsEntry(void) {
-    if (xe_orig_rowCount) return;   // 已经挂上
+    static BOOL done = NO;
+    static int tries = 0;
+    if (done || tries >= 5) return;
+    tries++;
 
     for (size_t i = 0; i < sizeof(kXESettingsClassNames) / sizeof(char *); i++) {
         Class cls = objc_getClass(kXESettingsClassNames[i]);
-        if (cls && XEInstallEntryHooksOn(cls) > 0) {
-            XELog(@"entry hooks installed on %s", kXESettingsClassNames[i]);
-            return;
+        if (cls && XEAddEntryClass(cls)) {
+            XELog(@"entry row hooked on %s", kXESettingsClassNames[i]);
         }
     }
 
-    // 版本改名兜底：扫「类名以 SettingsViewController 结尾 + 六个方法全在」的类
+    // 兜底：类名像「主设置页」的都试一遍（不问 青少年模式/隐私/字体 这些子页）
     const char *suffix = "SettingsViewController";
     size_t suffixLen = strlen(suffix);
     unsigned int count = 0;
@@ -735,13 +869,267 @@ static void XEInstallSettingsEntry(void) {
         if (!name) continue;
         size_t len = strlen(name);
         if (len < suffixLen || strcmp(name + len - suffixLen, suffix) != 0) continue;
-        if (!XEClassHasEntrySelectors(list[i])) continue;
-        if (XEInstallEntryHooksOn(list[i]) > 0) {
-            XELog(@"entry hooks installed on %s (fallback)", name);
-            break;
+        if (!strstr(name, "Common") && !strstr(name, "General") && !strstr(name, "Main")) continue;
+        if (XEAddEntryClass(list[i])) XELog(@"entry row hooked on %s (scan)", name);
+    }
+    if (list) free(list);
+
+    // 只有真挂上了才算完成：类还没注册（或名字变了）时留待下次激活再试
+    if (gXEEntryCount > 0) done = YES;
+    XELog(@"settings entry classes: %@", gXEEntryNames);
+}
+
+#pragma mark - 入口二：悬浮球
+// 不依赖 App 任何页面结构：挂在 keyWindow 上，App 跑起来就一定在。
+
+static UIButton *gXEFloatBtn = nil;
+
+static UIWindow *XEKeyWindow(void) {
+    if (@available(iOS 13.0, *)) {
+        UIApplication *app = [UIApplication sharedApplication];
+        for (UIScene *scene in [app connectedScenes]) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            if (scene.activationState != UISceneActivationStateForegroundActive) continue;
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                if (w.isKeyWindow) return w;
+            }
         }
     }
-    free(list);
+    UIWindow *legacy = [[UIApplication sharedApplication] keyWindow];
+    return legacy;
+}
+
+static UIViewController *XETopViewController(void) {
+    UIWindow *win = XEKeyWindow();
+    UIViewController *vc = [win rootViewController];
+    for (int i = 0; i < 32 && vc; i++) {
+        UIViewController *next = vc.presentedViewController;
+        if (!next && [vc isKindOfClass:[UINavigationController class]]) {
+            next = ((UINavigationController *)vc).topViewController;
+        }
+        if (!next && [vc isKindOfClass:[UITabBarController class]]) {
+            next = ((UITabBarController *)vc).selectedViewController;
+        }
+        if (!next || next == vc) break;
+        vc = next;
+    }
+    return vc;
+}
+
+@interface XEFloatEntry : NSObject
++ (instancetype)shared;
+- (void)install;
+- (BOOL)isVisible;
+@end
+
+@implementation XEFloatEntry
+
++ (instancetype)shared {
+    static XEFloatEntry *s = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ s = [[XEFloatEntry alloc] init]; });
+    return s;
+}
+
+- (BOOL)isVisible {
+    return gXEFloatBtn != nil && gXEFloatBtn.superview != nil;
+}
+
+- (void)install {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self install]; });
+        return;
+    }
+    if (!XEBool(@"floatingEntry", YES)) {
+        [gXEFloatBtn removeFromSuperview];
+        return;
+    }
+    UIWindow *win = XEKeyWindow();
+    if (!win) return;
+    if (gXEFloatBtn && gXEFloatBtn.superview == win) {
+        [win bringSubviewToFront:gXEFloatBtn];
+        return;
+    }
+
+    if (!gXEFloatBtn) {
+        CGFloat s = 46;
+        gXEFloatBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+        gXEFloatBtn.bounds = CGRectMake(0, 0, s, s);
+        gXEFloatBtn.layer.cornerRadius = s / 2;
+        gXEFloatBtn.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
+        gXEFloatBtn.layer.shadowColor = [[UIColor blackColor] CGColor];
+        gXEFloatBtn.layer.shadowOpacity = 0.28;
+        gXEFloatBtn.layer.shadowRadius = 4;
+        gXEFloatBtn.layer.shadowOffset = CGSizeMake(0, 2);
+        if (@available(iOS 13.0, *)) {
+            [gXEFloatBtn setImage:[UIImage systemImageNamed:@"gearshape.fill"]
+                         forState:UIControlStateNormal];
+            gXEFloatBtn.tintColor = [UIColor whiteColor];
+        } else {
+            [gXEFloatBtn setTitle:@"增强" forState:UIControlStateNormal];
+            gXEFloatBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+            [gXEFloatBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        }
+        [gXEFloatBtn addTarget:self
+                        action:@selector(handleTap)
+              forControlEvents:UIControlEventTouchUpInside];
+        UIPanGestureRecognizer *pan =
+            [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+        [gXEFloatBtn addGestureRecognizer:pan];
+    }
+
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    CGPoint c = CGPointMake(win.bounds.size.width - 46, win.bounds.size.height * 0.60);
+    if ([ud objectForKey:@"xeFloatX"] && [ud objectForKey:@"xeFloatY"]) {
+        c = CGPointMake([ud doubleForKey:@"xeFloatX"], [ud doubleForKey:@"xeFloatY"]);
+    }
+    c.x = MIN(MAX(c.x, 30), MAX(win.bounds.size.width - 30, 30));
+    c.y = MIN(MAX(c.y, 80), MAX(win.bounds.size.height - 60, 80));
+    gXEFloatBtn.center = c;
+    [win addSubview:gXEFloatBtn];
+    [win bringSubviewToFront:gXEFloatBtn];
+}
+
+- (void)handlePan:(UIPanGestureRecognizer *)g {
+    if (!gXEFloatBtn || !gXEFloatBtn.superview) return;
+    UIView *host = gXEFloatBtn.superview;
+    CGPoint t = [g translationInView:host];
+    CGPoint c = CGPointMake(gXEFloatBtn.center.x + t.x, gXEFloatBtn.center.y + t.y);
+    c.x = MIN(MAX(c.x, 30), MAX(host.bounds.size.width - 30, 30));
+    c.y = MIN(MAX(c.y, 60), MAX(host.bounds.size.height - 60, 60));
+    gXEFloatBtn.center = c;
+    [g setTranslation:CGPointZero inView:host];
+    if (g.state == UIGestureRecognizerStateEnded) {
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        [ud setDouble:c.x forKey:@"xeFloatX"];
+        [ud setDouble:c.y forKey:@"xeFloatY"];
+        [ud synchronize];
+    }
+}
+
+- (void)handleTap {
+    UIViewController *top = XETopViewController();
+    if (!top) return;
+    XELog(@"open enhance panel from float button");
+    XEShowSettingsFrom(top);
+}
+
+@end
+
+static BOOL XEFloatVisible(void) {
+    return [[XEFloatEntry shared] isVisible];
+}
+
+static void XEInstallFloatingEntry(void) {
+    [[XEFloatEntry shared] install];
+
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+        [nc addObserverForName:UIWindowDidBecomeKeyNotification
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *n) {
+            [[XEFloatEntry shared] install];
+        }];
+        [nc addObserverForName:UIApplicationDidBecomeActiveNotification
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *n) {
+            [[XEFloatEntry shared] install];
+            XEInstallSettingsEntry();   // 类注册得晚时补一次
+            XEPrefsChanged(NULL, NULL, NULL, NULL, NULL);
+        }];
+        if (@available(iOS 13.0, *)) {
+            [nc addObserverForName:UISceneDidActivateNotification
+                            object:nil
+                             queue:[NSOperationQueue mainQueue]
+                        usingBlock:^(NSNotification *n) {
+                [[XEFloatEntry shared] install];
+            }];
+        }
+    });
+}
+
+#pragma mark - 入口三：启动自证
+// 装完第一次启动会弹一次「已注入」，用来证实 dylib 真的被加载了。
+// 看不到这个弹窗 == 注入没成功，跟插件逻辑无关。
+
+static int gXEBeaconTries = 0;
+
+static void XEScheduleBeacon(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (!XEBool(@"showBeacon", YES)) return;
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        if ([[ud stringForKey:@"xeBeaconVersion"] isEqualToString:XE_VERSION]) return;
+
+        UIViewController *top = XETopViewController();
+        if (!top || top.presentedViewController || top.isBeingDismissed) {
+            if (++gXEBeaconTries < 15) XEScheduleBeacon();
+            return;
+        }
+
+        NSString *msg = [NSString stringWithFormat:
+            @"dylib 已加载，hook %ld/%ld。\n\n"
+             @"入口有两个，任选其一：\n"
+             @"· 屏幕右侧悬浮齿轮\n"
+             @"· 我的 → 设置 → 列表最后一行「迅雷增强」",
+            (long)gXEHookOK, (long)gXEHookTotal];
+        UIAlertController *ac =
+            [UIAlertController alertControllerWithTitle:
+                [NSString stringWithFormat:@"迅雷增强 v%@ 已生效", XE_VERSION]
+                                             message:msg
+                                      preferredStyle:UIAlertControllerStyleAlert];
+        [ac addAction:[UIAlertAction actionWithTitle:@"打开增强设置"
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(UIAlertAction *a) {
+            // 等弹窗真正关掉再开面板，否则 presenter 还是这个 UIAlertController
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                XEShowSettingsFrom(XETopViewController());
+            });
+        }]];
+        [ac addAction:[UIAlertAction actionWithTitle:@"知道了"
+                                             style:UIAlertActionStyleCancel
+                                           handler:nil]];
+        [top presentViewController:ac animated:YES completion:nil];
+
+        [ud setObject:XE_VERSION forKey:@"xeBeaconVersion"];
+        [ud synchronize];
+    });
+}
+
+#pragma mark - 诊断
+
+static NSString *XEDiagValue(NSString *kind) {
+    if ([kind isEqualToString:@"version"]) return XE_VERSION;
+    if ([kind isEqualToString:@"hooks"]) {
+        return [NSString stringWithFormat:@"%ld / %ld", (long)gXEHookOK, (long)gXEHookTotal];
+    }
+    if ([kind isEqualToString:@"float"]) {
+        return XEFloatVisible() ? @"已显示" : @"未显示";
+    }
+    if ([kind isEqualToString:@"classes"]) {
+        return gXEEntryNames.count ? [gXEEntryNames componentsJoinedByString:@"  "] : @"没找到";
+    }
+    if ([kind isEqualToString:@"hits"]) {
+        return [NSString stringWithFormat:@"%ld 次", gXESettingsHits];
+    }
+    return @"-";
+}
+
+static NSString *XEDiagReport(void) {
+    return [NSString stringWithFormat:
+        @"XunleiEnhance v%@\nbundle : %@\nhook : %ld/%ld\n"
+         @"入口类 : %@\n入口命中 : %ld\n悬浮球 : %@\nprefs : %@",
+        XE_VERSION,
+        [[NSBundle mainBundle] bundleIdentifier],
+        (long)gXEHookOK, (long)gXEHookTotal,
+        gXEEntryNames.count ? [gXEEntryNames componentsJoinedByString:@", "] : @"无",
+        gXESettingsHits,
+        XEFloatVisible() ? @"在屏" : @"未装",
+        gXEPrefs];
 }
 
 #pragma mark - 安装
@@ -810,8 +1198,10 @@ __attribute__((constructor)) static void XEInitialize(void) {
         gXEHookOK = ok;
         gXEHookTotal = total;
 
-        // 设置入口：往迅雷「设置」列表插一行（不需要 PreferenceLoader）
-        XEInstallSettingsEntry();
+        // 三个入口各自独立：哪个环境不适用都不影响另外两个
+        XEInstallSettingsEntry();     // ① 迅雷「设置」列表末尾一行
+        XEInstallFloatingEntry();     // ② 悬浮齿轮（不依赖页面结构）
+        XEScheduleBeacon();           // ③ 升级后首次启动自证一次
 
         XELog(@"installed %d/%d hooks, prefs=%@", ok, total, gXEPrefs);
         if (!gXEPrefs[@"debugLog"]) {
