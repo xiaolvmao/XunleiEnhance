@@ -5,8 +5,8 @@ INSTALL_TARGET_PROCESSES = TDMVideo
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = XunleiEnhance
-XunleiEnhance_FILES = Tweak.xm
-XunleiEnhance_CFLAGS = -fobjc-arc -Wno-unused-function
+XunleiEnhance_FILES = Tweak.m
+XunleiEnhance_CFLAGS = -fobjc-arc -Wno-unused-function -Wno-nullability-completeness
 XunleiEnhance_FRAMEWORKS = Foundation UIKit
 
 include $(THEOS_MAKE_PATH)/tweak.mk
