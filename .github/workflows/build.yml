@@ -8,36 +8,27 @@ on:
   workflow_dispatch:
 
 env:
-  THEOS: ${{ github.workspace }}/.theos-root
-  THEOS_PACKAGE_SCHEME: ''
   FINALPACKAGE: 1
 
 jobs:
   build:
     name: Build .deb
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Show toolchain
-        run: |
-          xcodebuild -version
-          clang --version | head -1
-
-      - name: Install host tools
-        run: |
-          brew install ldid xz dpkg
-
       - name: Install Theos
         run: |
-          mkdir -p "$THEOS"
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
-          mkdir -p "$THEOS/sdks"
-          curl -sL https://github.com/theos/sdks/archive/refs/heads/master.tar.gz \
-            | tar xz -C /tmp
-          cp -R /tmp/sdks-master/*.sdk "$THEOS/sdks/"
-          ls "$THEOS/sdks"
-          echo "NIC=$THEOS/bin" >> "$GITHUB_PATH"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fakeroot xz-utils make
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          echo "$HOME/theos/bin" >> "$GITHUB_PATH"
+
+      - name: Show toolchain
+        run: |
+          $THEOS/bin/ldid -h 2>&1 | head -2 || true
+          ls "$THEOS/sdks" | head
 
       - name: Build package
         run: |
