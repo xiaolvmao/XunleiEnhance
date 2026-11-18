@@ -7,6 +7,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 env:
   FINALPACKAGE: 1
 
@@ -27,8 +30,11 @@ jobs:
 
       - name: Show toolchain
         run: |
-          $THEOS/bin/ldid -h 2>&1 | head -2 || true
           ls "$THEOS/sdks" | head
+          command -v ldid || true
+
+      - name: Verify hooks against dumped symbols
+        run: python3 tools/verify_hooks.py --strict
 
       - name: Build package
         run: |
@@ -40,7 +46,6 @@ jobs:
           mkdir -p out
           cp packages/*.deb out/
           find .theos -name 'XunleiEnhance.dylib' -exec cp {} out/ \;
-          find .theos -name 'XunleiEnhancePrefs' -type f -exec cp {} out/XunleiEnhancePrefs.bundle.bin \;
           ls -la out/
 
       - uses: actions/upload-artifact@v4
