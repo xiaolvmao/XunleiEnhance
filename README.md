@@ -1,22 +1,26 @@
 # 迅雷增强 · XunleiEnhance
 
 针对 **迅雷 iOS（`com.xunlei.mvideo`，25.2.90 / build 28156）** 的 TrollStore / 越狱 dylib 插件：
-去掉开屏与信息流广告、关掉摇一摇误触跳转。开关面板**三个入口任选其一**（都不是隐藏手势）：
-屏幕右侧的**悬浮齿轮**、迅雷 **我的 → 设置 → 列表最后一行「迅雷增强」**、以及升级后首次启动的提示框。
-不需要 PreferenceLoader，也不需要连点版本号。
+开屏**秒进**、去掉信息流与广告位、关掉摇一摇误触跳转，并把「我的」页的推广板块整块隐掉。
+开关面板**三个入口任选其一**（都不是隐藏手势）：屏幕右侧的**悬浮齿轮**、
+迅雷 **我的 → 设置 → 列表最下面一行「迅雷增强」**（设置页右上角还有「增强」按钮）、
+以及升级后首次启动的提示框。不需要 PreferenceLoader，也不需要连点版本号。
 
 * **零越狱依赖**：不用 Logos（Logos 会链 `CydiaSubstrate`，TrollStore 注入环境没有它），
   自带 `method_setImplementation` hook 运行时，dylib 只依赖 Foundation / UIKit / libobjc，
   可以直接被 TrollFools 注入。
-* **不猜类名**：30 个 hook 点全部从 `TDMVideo` 主二进制的 `__objc_classlist` 静态解析得到，
-  方法名 + 类型编码逐条核对（`tools/verify_hooks.py`，当前 30/30 通过）。
+* **不猜类名**：27 个 hook 点全部从 `TDMVideo` 主二进制的 `__objc_classlist` 静态解析得到，
+  方法名 + 类型编码逐条核对（`tools/verify_hooks.py`，当前 27/27 通过）。
+* **入口不依赖数据源**：设置页那一行是直接替换 `tableFooterView` 注入的视图，
+  不需要命中 `UITableView` 的 dataSource，也不受设置页换实现影响。
 
 ## 功能
 
 | 开关 | 默认 | 说明 | 落点 |
 | --- | --- | --- | --- |
 | 启用迅雷增强 | 开 | 总开关，关闭后全部逻辑短路 | — |
-| 去除开屏广告 | 开 | 自渲染开屏出现即关闭；第三方/聚合开屏的展示入口直接拦截 | `ZY*SplashViewController` / `GMSplashAd` / `JHSplashAd` / `UBiXSplashAd` / `EMNativeAdViewController` |
+| 去除开屏广告 | 开 | 自渲染开屏出现即走「跳过」；第三方/聚合开屏的展示入口直接拦截 | `ZY*SplashViewController` / `GMSplashAd` / `JHSplashAd` / `UBiXSplashAd` / `EMNativeAdViewController` |
+| 开屏秒进（不等待） | 开 | 启动链路直接返回「没有开屏要处理」，不展示占位图、不等超时，点图标即进主界面 | `XCSplashService` / `XCSplashView` / `XCSplashContainerViewController` |
 | 去除信息流广告 | 开 | 广告不再从出价池取出 | `XCAdCoreCacheManager` |
 | 拦截广告预加载 | 开 | 预加载数量与缓存计数归零，顺带省流量 | `XCAdCoreCacheManager` |
 | 隐藏广告卡片 | 开 | 广告 cell 不挂载广告内容（不改高度，不动列表布局） | `DJXAdCollectionViewCell` |
@@ -24,19 +28,23 @@
 | 关闭个性化广告推荐 | 开 | 等价于 App 内「广告设置 → 个性化推荐」关闭 | `XCAdConfigManager` |
 | 关闭摇一摇 / 扭一扭跳转 | 开 | 误触重灾区，配置层直接关掉 | `XCAdConfigModel` |
 | 限制广告自动跳转 | 开 | 禁止广告点击后自动唤起 App Store / 第三方 App | `XCAdConfigManager` |
+| 隐藏会员 / 充值推广 | 关 | 「我的」页会员卡、充值 banner、试用条整块隐掉 | 视图层（`Vip*` / `Purchase*`） |
+| 隐藏游戏中心 | 关 | 「我的」页游戏中心区块隐掉 | 视图层（`Game*`） |
+| 隐藏运营推荐位 | 关 | 运营 banner、推荐位、活动卡隐掉 | 视图层（`Banner*` / `Recommend*` / `Activity*`） |
 | 显示悬浮入口 | 开 | 右侧半透明齿轮，可拖动；关掉后只剩设置页那一行 | — |
 | 升级后提示已生效 | 开 | 每个版本首次启动弹一次，兼作注入自证 | — |
 | 输出调试日志 | 关 | `XunleiEnhance` 前缀日志，便于自查 | — |
 
-改开关即时热加载（Darwin 通知）；开屏相关的判断在下次启动迅雷时读取。
+改开关即时热加载（Darwin 通知）；「我的」页净化改动后重进该页完全生效；
+开屏秒进在下次启动迅雷时读取。
 
 ## 安装
 
 ### A. TrollStore + TrollFools（推荐）
 
-1. 下载 `com.xiaolvmao.xunleienhance_2.0.0_iphoneos-arm.deb`（Releases 或 Actions 工件）
+1. 下载 `com.xiaolvmao.xunleienhance_2.1.0_iphoneos-arm.deb`（Releases 或 Actions 工件）
 2. **TrollFools** → `+` → 选这个 deb → 选「迅雷」→ 注入 → 重启迅雷
-3. 打开迅雷，**核对入口**：应在 2 秒内弹出「迅雷增强 v2.0.0 已生效」；
+3. 打开迅雷，**核对入口**：应在 2 秒内弹出「迅雷增强 v2.1.0 已生效」；
    同时屏幕右侧出现半透明齿轮（可拖动，位置会记住）
 
 如果没有弹窗、也没有齿轮，说明 **dylib 没被加载**（注入失败），与插件逻辑无关 ——
@@ -81,14 +89,17 @@ make package FINALPACKAGE=1
 
 | # | 入口 | 依赖 | 说明 |
 | --- | --- | --- | --- |
-| ① | 迅雷 `我的 → 设置` 列表最后一行「迅雷增强 去广告 ›」 | 设置页类名 / 结构 | 最原生，跟着迅雷的设置页走 |
+| ① | 迅雷 `我的 → 设置` 列表最下面一行「迅雷增强 去广告 · 开屏秒进 · 我的页净化」 | 只需设置页的 tableView | 视图注入，最原生 |
 | ② | 屏幕右侧半透明**悬浮齿轮** | 无（挂 keyWindow） | 版本更新也不会失效；可在面板里关掉 |
 | ③ | 升级后首次启动的「已生效」提示框 | 无 | 兼作注入是否成功的自证 |
+
+设置页右上角还会额外挂一个「增强」按钮（页面自带右侧按钮时不覆盖）。
 
 ```
 迅雷增强（开关面板）
 ├─ 通用              启用迅雷增强
-├─ 广告拦截          去除开屏 / 信息流 / 预加载 / 卡片
+├─ 广告拦截          去除开屏 / 开屏秒进 / 信息流 / 预加载 / 卡片
+├─ 「我的」页净化    会员充值 / 游戏中心 / 运营推荐位
 ├─ 深度屏蔽（激进）  屏蔽全部广告位
 ├─ 体验优化          关个性化 / 关摇一摇 / 限制自动跳转
 ├─ 入口              显示悬浮入口 / 升级后提示
@@ -96,33 +107,29 @@ make package FINALPACKAGE=1
 └─ 诊断              版本 · Hook 安装 · 入口状态 · 一键复制诊断文本
 ```
 
-### ① 设置列表行是怎么插的
+### ① 设置页那一行是怎么插的
 
-hook 迅雷设置页（`_TtC8TDMVideo28CommonSettingsViewController`）的 6 个索引路径方法，
-把「多出来的那一行」拦下来，其余全部原样转发：
+v2.0 走的是「hook 设置页 dataSource，把最后一段的行数 +1」：只要设置页的
+`UITableView` 的 dataSource 不是 VC 本身（Swift 页面很常见），这条路就彻底失效 ——
+表现就是**齿轮在、设置里那行不在**。
 
-| 方法 | 我们的处理 |
-| --- | --- |
-| `tableView:numberOfRowsInSection:` | 最后一段 +1（读 `[tableView numberOfSections]` 动态取） |
-| `tableView:cellForRowAtIndexPath:` | 该行返回自建 cell（`迅雷增强 / 去广告 ›`） |
-| `tableView:didSelectRowAtIndexPath:` | 该行 push 插件面板 |
-| `tableView:heightForRowAtIndexPath:` | 该行复用首行高度 |
-| `tableView:canEditRowAtIndexPath:` | 该行禁止编辑 |
-| `tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:` | 该行无滑动菜单 |
+v2.1 换成视图级注入，跟数据源完全无关：
 
-两个必须注意的点（v1.1.0 就是栽在这儿）：
+1. 0.5s 一次的轻量探针（`NSRunLoopCommonModes`，滚动中也不会停）取当前顶层 VC；
+2. 类名含 `Setting`（或标题是「设置 / 設定 / Settings」）即认为是设置页；
+3. 在它的视图树里找第一个 `UITableView`，把 `tableFooterView` 换成自建条目
+   （圆角卡片 + `迅雷增强` / `去广告 · 开屏秒进 · 我的页净化` + 箭头）；
+   页面原本有 footer 时用容器包一层，不覆盖原内容；
+4. 没有 tableView 的页面退化成贴底一条，位置固定在安全区上方；
+5. 同一 VC 用关联对象打标，只注入一次；页面自带右侧按钮时不覆盖，否则挂「增强」。
 
-* **只挂「类自己实现」了数据源方法的类**（`class_copyMethodList` 判定）。若 VC 只是继承了
-  这些方法、真正的 dataSource 在别的对象上，挂在 VC 上永远收不到回调 —— 加了行也不会出现。
-* **orig 按类分表存**（`gXEEntry[]`），不是全局单例，否则多个设置页之间实现指针会串台。
-
-类名兜底：扫描「类名以 `SettingsViewController` 结尾且含 `Common`/`General`/`Main`」的类，
-最多重试 5 次（类注册得比 dylib 构造晚时仍能补上）。
+因为位置是「列表最后一行」本身，不需要猜段数、不需要类自己实现数据源方法，
+也不会因为迅雷改设置页实现而失效。
 
 ### 诊断
 
-面板最后一组实时显示：版本、hook 装上几项、设置页入口类名、设置页数据源被调用过几次
-（`设置页控制次数`）、悬浮入口是否在屏。整段可一键复制，排查时直接发出来即可判断是哪一环断了。
+面板最后一组实时显示：版本、hook 装上几项、**最近一次注入的设置页类名与注入次数**、
+**「我的」页拦下了几块**、悬浮入口是否在屏。整段可一键复制，排查时直接发出来即可判断是哪一环断了。
 
 其余文件：
 
@@ -130,7 +137,7 @@ hook 迅雷设置页（`_TtC8TDMVideo28CommonSettingsViewController`）的 6 个
 | --- | --- |
 | `Tweak.m` | hook 运行时 + 广告拦截 + 三个入口 + 设置面板（`XESettingsController`） |
 | `layout/.../PreferenceLoader/Preferences/XunleiEnhance.plist` | 仅越狱：系统设置里的入口行 |
-| `layout/.../XunleiEnhancePrefs.bundle/Root.plist` | 仅越狱：系统设置里的二级页面（12 个开关） |
+| `layout/.../XunleiEnhancePrefs.bundle/Root.plist` | 仅越狱：系统设置里的二级页面（16 个开关） |
 
 偏好存储：**App 容器内的 `NSUserDefaults`（主）**，兼容读取
 `com.xunlei.mvideo.xunleienhance` 偏好域（越狱面板写入的值）。改动即时生效（Darwin 通知热加载）。

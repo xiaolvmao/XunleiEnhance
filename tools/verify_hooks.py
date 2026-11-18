@@ -20,26 +20,8 @@ TWEAK = os.path.join(ROOT, "Tweak.m")
 SYMBOLS = os.path.join(HERE, "symbols.json")
 
 HOOK_RE = re.compile(r"XE_HOOK\(\s*([A-Za-z_]\w*)\s*,\s*([A-Za-z_][\w:]*)\s*,")
-SETTINGS_CLASSES_RE = re.compile(r"kXESettingsClassNames\[\]\s*=\s*\{(.*?)\};", re.S)
-
-# 设置页入口挂的 6 个方法（运行时按类名动态安装，不在 XE_HOOK 表里）
-SETTINGS_SELECTORS = [
-    "tableView:numberOfRowsInSection:",
-    "tableView:cellForRowAtIndexPath:",
-    "tableView:didSelectRowAtIndexPath:",
-    "tableView:heightForRowAtIndexPath:",
-    "tableView:canEditRowAtIndexPath:",
-    "tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:",
-]
-
-
-def parse_settings_classes(path):
-    src = open(path, encoding="utf-8").read()
-    src = re.sub(r"//[^\n]*", "", src)
-    out = []
-    for block in SETTINGS_CLASSES_RE.findall(src):
-        out.extend(re.findall(r'"([^"]+)"', block))
-    return out
+# 设置页入口 v2.1 起改成视图注入（替换 tableFooterView），不再依赖 dataSource
+# 方法，所以这里只需要校验 XE_HOOK 表里的真实方法。
 
 
 def parse_tweak(path):
@@ -49,10 +31,7 @@ def parse_tweak(path):
     src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
     src = src.replace("\\\n", " ")  # 展开续行
     src = re.sub(r"^\s*#define[^\n]*", "", src, flags=re.M)  # 去掉宏定义本身
-    hooks = [(m.group(1), m.group(2)) for m in HOOK_RE.finditer(src)]
-    for cls in parse_settings_classes(path):
-        hooks.extend((cls, sel) for sel in SETTINGS_SELECTORS)
-    return hooks
+    return [(m.group(1), m.group(2)) for m in HOOK_RE.finditer(src)]
 
 
 def main():

@@ -51,6 +51,20 @@
 			<true/>
 			<key>defaults</key>
 			<string>com.xunlei.mvideo.xunleienhance</string>
+			<key>footerText</key>
+			<string>在启动链路里就返回「没有开屏要处理」，不展示占位图、不等待超时，点开图标直接进主界面。</string>
+			<key>key</key>
+			<string>instantSplash</string>
+			<key>label</key>
+			<string>开屏秒进（不等待）</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
 			<key>key</key>
 			<string>blockFeedAd</string>
 			<key>label</key>
@@ -103,6 +117,50 @@
 			<string>blockAllSlots</string>
 			<key>label</key>
 			<string>屏蔽全部广告位</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>按板块整块隐掉推广内容；云盘、离线、分享、收藏、设置这些功能入口不受影响。改动后重进「我的」页生效。</string>
+			<key>label</key>
+			<string>「我的」页净化</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+			<key>key</key>
+			<string>hideMineVip</string>
+			<key>label</key>
+			<string>隐藏会员 / 充值推广</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+			<key>key</key>
+			<string>hideMineGame</string>
+			<key>label</key>
+			<string>隐藏游戏中心</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+			<key>key</key>
+			<string>hideMinePromo</string>
+			<key>label</key>
+			<string>隐藏运营推荐位</string>
 		</dict>
 		<dict>
 			<key>cell</key>

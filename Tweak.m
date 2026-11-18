@@ -20,9 +20,12 @@
 
 #define XE_PREF_DOMAIN_STR "com.xunlei.mvideo.xunleienhance"
 #define XE_NOTIFY_STR "com.xiaolvmao.xunleienhance/reload"
-#define XE_VERSION @"2.0.0"
+#define XE_VERSION @"2.1.0"
 
 static NSDictionary *gXEPrefs = nil;
+
+// 由「入口」段实现，各段都要用，先声明
+static UIViewController *XETopViewController(void);
 
 #pragma mark - 日志
 
@@ -47,6 +50,7 @@ static NSDictionary *XEDefaults(void) {
         d = @{
             @"enabled": @YES,
             @"blockSplash": @YES,
+            @"instantSplash": @YES,   // 开屏秒进：不展示、不等待
             @"blockFeedAd": @YES,
             @"blockAdLoad": @YES,
             @"hideAdCell": @YES,
@@ -54,6 +58,10 @@ static NSDictionary *XEDefaults(void) {
             @"disablePersonalize": @YES,
             @"disableShake": @YES,
             @"limitAutoJump": @YES,
+            // 「我的」页净化
+            @"hideMineVip": @YES,     // 会员 / 充值推广卡
+            @"hideMineGame": @YES,    // 游戏中心
+            @"hideMinePromo": @YES,   // 运营 banner / 推荐位
             @"debugLog": @NO,
             // 入口相关
             @"floatingEntry": @YES,   // 悬浮球（不依赖 App 任何页面结构）
@@ -155,6 +163,10 @@ static BOOL XEBool(NSString *key, BOOL fallback) {
 
 static inline BOOL XEEnabled(void)          { return XEBool(@"enabled", YES); }
 static inline BOOL XE_BlockSplash(void)     { return XEEnabled() && XEBool(@"blockSplash", YES); }
+static inline BOOL XE_InstantSplash(void)   { return XE_BlockSplash() && XEBool(@"instantSplash", YES); }
+static inline BOOL XE_HideMineVip(void)     { return XEEnabled() && XEBool(@"hideMineVip", YES); }
+static inline BOOL XE_HideMineGame(void)    { return XEEnabled() && XEBool(@"hideMineGame", YES); }
+static inline BOOL XE_HideMinePromo(void)   { return XEEnabled() && XEBool(@"hideMinePromo", YES); }
 static inline BOOL XE_BlockFeedAd(void)     { return XEEnabled() && XEBool(@"blockFeedAd", YES); }
 static inline BOOL XE_BlockAdLoad(void)     { return XEEnabled() && XEBool(@"blockAdLoad", YES); }
 static inline BOOL XE_HideAdCell(void)      { return XEEnabled() && XEBool(@"hideAdCell", YES); }
@@ -301,25 +313,37 @@ static int xe_shakeState(id self, SEL _cmd) {
 
 #pragma mark - 开屏广告：自渲染
 
+// 「秒进」的关键：不是把已经显示的开屏动画关掉（那一定会有 0.1~0.3s 的闪现），
+// 而是在开屏还没被展示前就走「跳过」分支——
+//   ① XCSplashService 的启动入口直接返回「没有开屏要处理」，主界面立刻出来；
+//   ② XCSplashView 拒绝展示广告；
+//   ③ 容器真的出现了（旧版本 / 后台回前台），立刻 stopCutDown + skipAction，0 延迟。
 static void xe_closeSplash(id vc) {
-    SEL sel = NSSelectorFromString(@"closeAd");
-    if (![vc respondsToSelector:sel]) {
-        XELog(@"%@ has no closeAd", NSStringFromClass([vc class]));
-        return;
-    }
+    SEL stop = NSSelectorFromString(@"stopCutDown");
+    SEL skip = NSSelectorFromString(@"skipAction");
+    SEL close = NSSelectorFromString(@"closeAd");
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-    [vc performSelector:sel];
+    if ([vc respondsToSelector:stop]) [vc performSelector:stop];
+    // skipAction 才是用户在「跳过」按钮上点的那条路：报表 / 回调 / 关窗都走完整流程
+    if ([vc respondsToSelector:skip]) {
+        [vc performSelector:skip];
+    } else if ([vc respondsToSelector:close]) {
+        [vc performSelector:close];
+    } else {
+        XELog(@"%@ has neither skipAction nor closeAd", NSStringFromClass([vc class]));
+        return;
+    }
 #pragma clang diagnostic pop
-    XELog(@"closed self-rendered splash: %@", NSStringFromClass([vc class]));
+    XELog(@"skipped self-rendered splash: %@", NSStringFromClass([vc class]));
 }
 
 static void (*xe_orig_mixSplashWillAppear)(id, SEL, BOOL);
 static void xe_mixSplashWillAppear(id self, SEL _cmd, BOOL animated) {
     xe_orig_mixSplashWillAppear(self, _cmd, animated);
     if (!XE_BlockSplash()) return;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
+    // 0 延迟：本 runloop 结束就跳过，肉眼看不到开屏
+    dispatch_async(dispatch_get_main_queue(), ^{
         xe_closeSplash(self);
     });
 }
@@ -328,8 +352,57 @@ static void (*xe_orig_customSplashWillAppear)(id, SEL, BOOL);
 static void xe_customSplashWillAppear(id self, SEL _cmd, BOOL animated) {
     xe_orig_customSplashWillAppear(self, _cmd, animated);
     if (!XE_BlockSplash()) return;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)),
+    dispatch_async(dispatch_get_main_queue(), ^{
+        xe_closeSplash(self);
+    });
+}
+
+#pragma mark - 开屏秒进：启动链路拦截
+
+// 保险丝：万一某个版本的启动流程在「没有开屏」之后仍然卡在开屏容器上，
+// 1.5s 后把还停在屏幕上的 Splash VC 关掉，保证一定进得了主界面。
+static void XESplashWatchdog(void) {
+    static BOOL armed = NO;
+    if (armed) return;
+    armed = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
+        UIViewController *top = XETopViewController();
+        NSString *cls = NSStringFromClass([top class]);
+        if (!cls || [cls rangeOfString:@"Splash" options:NSCaseInsensitiveSearch].location == NSNotFound)
+            return;
+        XELog(@"watchdog: dismiss stuck splash %@", cls);
+        UIViewController *presenter = top.presentingViewController ?: top;
+        [presenter dismissViewControllerAnimated:NO completion:nil];
+    });
+}
+
+// 返回 NO == 「这次启动没有开屏要处理」，App 直接进主界面，不占位、不等待。
+static BOOL (*xe_orig_splashLaunch)(id, SEL, id, id);
+static BOOL xe_splashLaunch(id self, SEL _cmd, id slotTag, id ext) {
+    if (XE_InstantSplash()) {
+        XELog(@"skip splash at launch (slotTag=%@)", slotTag);
+        XESplashWatchdog();
+        return NO;
+    }
+    return xe_orig_splashLaunch(self, _cmd, slotTag, ext);
+}
+
+static BOOL (*xe_orig_splashShow)(id, SEL, id, id);
+static BOOL xe_splashShow(id self, SEL _cmd, id ad, id strategy) {
+    if (XE_InstantSplash()) {
+        XELog(@"refuse to present splash view");
+        XESplashWatchdog();
+        return NO;
+    }
+    return xe_orig_splashShow(self, _cmd, ad, strategy);
+}
+
+static void (*xe_orig_splashContainerAppear)(id, SEL, BOOL);
+static void xe_splashContainerAppear(id self, SEL _cmd, BOOL animated) {
+    xe_orig_splashContainerAppear(self, _cmd, animated);
+    if (!XE_BlockSplash()) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
         xe_closeSplash(self);
     });
 }
@@ -418,6 +491,7 @@ static NSString *XEDiagValue(NSString *kind);
 static NSString *XEDiagReport(void);
 static BOOL XEFloatVisible(void);
 static void XEInstallFloatingEntry(void);
+static void XEInstallSettingsEntry(void);
 
 @interface XESettingsController : UITableViewController
 - (void)xe_toast:(NSString *)text;
@@ -436,9 +510,18 @@ static NSArray *XEPanelSpec(void) {
                @"footer": @"开屏、信息流、预加载、卡片挂载四个入口一起拦截。",
                @"items": @[
                    @{ @"key": @"blockSplash", @"title": @"去除开屏广告" },
+                   @{ @"key": @"instantSplash", @"title": @"开屏秒进（不等待）" },
                    @{ @"key": @"blockFeedAd", @"title": @"去除信息流广告" },
                    @{ @"key": @"blockAdLoad", @"title": @"拦截广告预加载" },
                    @{ @"key": @"hideAdCell", @"title": @"隐藏广告卡片" },
+               ] },
+
+            @{ @"title": @"「我的」页净化",
+               @"footer": @"按板块整块隐掉：会员/充值推广、游戏中心、运营 banner 与推荐位。云盘、离线、分享、设置这些功能入口不动。",
+               @"items": @[
+                   @{ @"key": @"hideMineVip", @"title": @"隐藏会员 / 充值推广" },
+                   @{ @"key": @"hideMineGame", @"title": @"隐藏游戏中心" },
+                   @{ @"key": @"hideMinePromo", @"title": @"隐藏运营推荐位" },
                ] },
 
             @{ @"title": @"深度屏蔽（激进）",
@@ -471,7 +554,8 @@ static NSArray *XEPanelSpec(void) {
                    @{ @"info": @"hooks", @"title": @"Hook 安装" },
                    @{ @"info": @"float", @"title": @"悬浮入口" },
                    @{ @"info": @"classes", @"title": @"设置页入口" },
-                   @{ @"info": @"hits", @"title": @"设置页控制次数" },
+                   @{ @"info": @"hits", @"title": @"设置页注入次数" },
+                   @{ @"info": @"mine", @"title": @"我的页拦截" },
                    @{ @"action": @"copydiag", @"title": @"复制诊断信息" },
                ] },
 
@@ -602,8 +686,12 @@ static NSArray *XEPanelSpec(void) {
     if ([key isEqualToString:@"showBeacon"]) {
         [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"xeBeaconVersion"];
     }
+    if ([key hasPrefix:@"hideMine"]) {
+        XERefreshMineClean();
+    }
     if ([key isEqualToString:@"enabled"]) {
         [self.tableView reloadData];
+        XERefreshMineClean();
     }
 }
 
@@ -655,228 +743,329 @@ static void XEShowSettingsFrom(UIViewController *from) {
     [from presentViewController:wrapper animated:YES completion:nil];
 }
 
-#pragma mark - 入口一：往迅雷设置列表末尾追加一行
-// 只碰「多出来那一行」的 6 个索引路径方法，其余原样转发给原实现。
-// 按类分表存 orig：同一个版本里可能存在多个设置页，各类的实现指针不能串台。
+#pragma mark - 「我的」页净化
+// 迅雷「我的」页是 Swift 混编页面，section 由服务端配置驱动，静态拿不到结构，
+// 也就没法像广告那样 hook 数据源。这里走视图级：板块视图挂上来的时候按类名
+// 认人，命中就整块隐掉（UIStackView 里 hidden 会自动塌陷，不留空档）。
+// 只认「推广类」组件，功能入口（云盘 / 离线 / 分享 / 设置）一律不动。
 
-#define XE_ENTRY_TITLE @"迅雷增强"
-#define XE_MAX_ENTRY_CLASSES 6
+static long gXEMineHidden = 0;
 
-typedef struct {
-    Class cls;
-    IMP rows;
-    IMP cell;
-    IMP didSelect;
-    IMP height;
-    IMP canEdit;
-    IMP swipe;
-} XEEntryOrig;
+typedef NS_ENUM(NSInteger, XECleanKind) {
+    XECleanNone = 0,
+    XECleanVip,
+    XECleanGame,
+    XECleanPromo,
+};
 
-static XEEntryOrig gXEEntry[XE_MAX_ENTRY_CLASSES];
-static int gXEEntryCount = 0;
-static NSMutableArray<NSString *> *gXEEntryNames = nil;   // 诊断用
-static long gXESettingsHits = 0;                         // 设置页 hook 命中次数
+// addSubview 是全 App 最高频的调用之一，这里不能做任何 OC 对象操作：
+// 直接拿 class_getName 的 const char * 做 strstr，再把结论按 Class 指针缓存。
+static const char *kXEVipKeys[] = {
+    "VipInfoItemView", "VipInfoPopView", "KuaiNiaoVipTryEntranceBar",
+    "PurchaseUpgradePriceBanner", "VipPrivilegeRow", "VipCard",
+    "PersonalCenterVipCard", "SuperVipEntry",
+};
+static const char *kXEGameKeys[] = {
+    "GameEntryView", "GameCenterHeadView", "GameCenterEntry",
+    "GameCenterCell", "GameRecommend",
+};
+static const char *kXEPromoKeys[] = {
+    "RecommendItemView", "BannerService", "ActivityCenter",
+    "PersonalCenterRecommend", "MineRecommend", "OperationCard",
+    "PersonalCenterActivity",
+};
 
-static XEEntryOrig *XEEntryFor(id self) {
-    for (Class c = object_getClass(self); c; c = class_getSuperclass(c)) {
-        for (int i = 0; i < gXEEntryCount; i++) {
-            if (gXEEntry[i].cls == c) return &gXEEntry[i];
-        }
-    }
-    return NULL;
-}
-
-// 追加到「最后一段」末尾，视觉上就是列表最后一行
-static NSInteger XEEntrySection(UITableView *tv) {
-    NSInteger n = (NSInteger)[tv numberOfSections];
-    return n > 0 ? n - 1 : 0;
-}
-
-static NSInteger XECallRows(XEEntryOrig *o, id self, SEL _cmd, UITableView *tv, NSInteger section) {
-    if (!o || !o->rows) return 0;
-    return ((NSInteger (*)(id, SEL, UITableView *, NSInteger))o->rows)(self, _cmd, tv, section);
-}
-
-static NSInteger XEAppRowCount(XEEntryOrig *o, id self, UITableView *tv) {
-    return XECallRows(o, self, @selector(tableView:numberOfRowsInSection:), tv, XEEntrySection(tv));
-}
-
-static BOOL XEIsEntryRow(XEEntryOrig *o, id self, UITableView *tv, NSIndexPath *ip) {
-    if (!o || !ip) return NO;
-    if (ip.section != XEEntrySection(tv)) return NO;
-    return ip.row == XEAppRowCount(o, self, tv);
-}
-
-static NSInteger xe_rowCount(id self, SEL _cmd, UITableView *tv, NSInteger section) {
-    XEEntryOrig *o = XEEntryFor(self);
-    NSInteger n = XECallRows(o, self, _cmd, tv, section);
-    if (!o) return n;
-    gXESettingsHits++;
-    return (section == XEEntrySection(tv)) ? n + 1 : n;
-}
-
-static UITableViewCell *xe_cellForRow(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    XEEntryOrig *o = XEEntryFor(self);
-    if (!XEIsEntryRow(o, self, tv, ip)) {
-        if (o && o->cell) {
-            return ((UITableViewCell *(*)(id, SEL, UITableView *, NSIndexPath *))o->cell)
-                (self, _cmd, tv, ip);
-        }
-        return [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
-                                      reuseIdentifier:nil];
-    }
-
-    static NSString *rid = @"XunleiEnhanceEntry";
-    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:rid];
-    if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1
-                                     reuseIdentifier:rid];
-        cell.textLabel.text = XE_ENTRY_TITLE;
-        cell.detailTextLabel.text = @"去广告";
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-    }
-    return cell;
-}
-
-static void xe_didSelectRow(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    XEEntryOrig *o = XEEntryFor(self);
-    if (!XEIsEntryRow(o, self, tv, ip)) {
-        if (o && o->didSelect) {
-            ((void (*)(id, SEL, UITableView *, NSIndexPath *))o->didSelect)(self, _cmd, tv, ip);
-        }
-        return;
-    }
-    [tv deselectRowAtIndexPath:ip animated:YES];
-    XELog(@"open enhance panel from settings row");
-    XEShowSettingsFrom(self);
-}
-
-static double xe_rowHeight(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    XEEntryOrig *o = XEEntryFor(self);
-    if (!XEIsEntryRow(o, self, tv, ip)) {
-        if (o && o->height) {
-            return ((double (*)(id, SEL, UITableView *, NSIndexPath *))o->height)
-                (self, _cmd, tv, ip);
-        }
-        return UITableViewAutomaticDimension;
-    }
-    NSInteger sec = XEEntrySection(tv);
-    NSInteger rows = XECallRows(o, self, @selector(tableView:numberOfRowsInSection:), tv, sec);
-    double h = 0;
-    if (o && o->height && rows > 0) {
-        // 复用该段首行高度，看起来跟原生行一致；空段不要问原实现（会越界）
-        h = ((double (*)(id, SEL, UITableView *, NSIndexPath *))o->height)(
-            self, _cmd, tv, [NSIndexPath indexPathForRow:0 inSection:sec]);
-    }
-    if (!(h > 30) || h > 100) h = 54;
-    return h;
-}
-
-static BOOL xe_canEditRow(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    XEEntryOrig *o = XEEntryFor(self);
-    if (XEIsEntryRow(o, self, tv, ip)) return NO;
-    if (o && o->canEdit) {
-        return ((BOOL (*)(id, SEL, UITableView *, NSIndexPath *))o->canEdit)(self, _cmd, tv, ip);
+static BOOL XENameContains(const char *name, const char **keys, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (strstr(name, keys[i])) return YES;
     }
     return NO;
 }
 
-static id xe_swipeActions(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    XEEntryOrig *o = XEEntryFor(self);
-    if (XEIsEntryRow(o, self, tv, ip)) return nil;
-    if (o && o->swipe) {
-        return ((id (*)(id, SEL, UITableView *, NSIndexPath *))o->swipe)(self, _cmd, tv, ip);
+typedef struct {
+    Class cls;
+    XECleanKind kind;
+} XECleanCacheEntry;
+
+static XECleanCacheEntry gXECleanCache[96];
+static int gXECleanCacheCount = 0;
+
+static XECleanKind XECleanKindForClass(Class cls) {
+    if (!cls) return XECleanNone;
+    for (int i = 0; i < gXECleanCacheCount; i++) {
+        if (gXECleanCache[i].cls == cls) return gXECleanCache[i].kind;
+    }
+
+    const char *name = class_getName(cls);
+    XECleanKind kind = XECleanNone;
+    if (name && name[0] && !(name[0] == 'X' && name[1] == 'E')) {
+        if (XENameContains(name, kXEVipKeys, sizeof(kXEVipKeys) / sizeof(char *))) {
+            kind = XECleanVip;
+        } else if (XENameContains(name, kXEGameKeys, sizeof(kXEGameKeys) / sizeof(char *))) {
+            kind = XECleanGame;
+        } else if (XENameContains(name, kXEPromoKeys, sizeof(kXEPromoKeys) / sizeof(char *))) {
+            kind = XECleanPromo;
+        }
+    }
+
+    if (gXECleanCacheCount < 96) {
+        gXECleanCache[gXECleanCacheCount].cls = cls;
+        gXECleanCache[gXECleanCacheCount].kind = kind;
+        gXECleanCacheCount++;
+    }
+    return kind;
+}
+
+// 三个开关全关时直接短路，addSubview 上几乎没有额外开销
+static BOOL XEMineCleanWanted(void) {
+    return XE_HideMineVip() || XE_HideMineGame() || XE_HideMinePromo();
+}
+
+static BOOL XEShouldHideView(UIView *v) {
+    if (!v) return NO;
+
+    // 先看类名（走指针缓存，几乎零成本），不是推广组件就立刻返回，
+    // 不读偏好，也不碰任何 OC 对象。
+    XECleanKind kind = XECleanKindForClass(object_getClass(v));
+    switch (kind) {
+        case XECleanVip:   return XE_HideMineVip();
+        case XECleanGame:  return XE_HideMineGame();
+        case XECleanPromo: return XE_HideMinePromo();
+        case XECleanNone:  break;
+    }
+    return NO;
+}
+
+static void XEHideMineBlock(UIView *v) {
+    if (!v || v.hidden) return;
+    v.hidden = YES;
+    v.alpha = 0;
+    v.userInteractionEnabled = NO;
+    gXEMineHidden++;
+    XELog(@"hidden mine block: %@", NSStringFromClass([v class]));
+}
+
+static void XESweepMineView(UIView *v, int depth) {
+    if (!v || depth > 16) return;
+    if (XEShouldHideView(v)) XEHideMineBlock(v);
+    for (UIView *sub in v.subviews) XESweepMineView(sub, depth + 1);
+}
+
+// 面板里改了开关：清判定缓存并立刻重扫一遍当前页面，不用杀进程
+static void XERefreshMineClean(void) {
+    gXECleanCacheCount = 0;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *top = XETopViewController();
+        if (top) XESweepMineView(top.view, 0);
+    });
+}
+
+static void (*xe_orig_addSubview)(id, SEL, UIView *);
+static void xe_addSubview(id self, SEL _cmd, UIView *v) {
+    xe_orig_addSubview(self, _cmd, v);
+    if (XEShouldHideView(v)) XEHideMineBlock(v);
+}
+
+static void (*xe_orig_insertSubview)(id, SEL, UIView *, NSInteger);
+static void xe_insertSubview(id self, SEL _cmd, UIView *v, NSInteger index) {
+    xe_orig_insertSubview(self, _cmd, v, index);
+    if (XEShouldHideView(v)) XEHideMineBlock(v);
+}
+
+static void XEInstallMineCleaner(void) {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;
+    XEInstallOn([UIView class], "addSubview:", (IMP)xe_addSubview, (IMP *)&xe_orig_addSubview);
+    XEInstallOn([UIView class], "insertSubview:atIndex:", (IMP)xe_insertSubview,
+                (IMP *)&xe_orig_insertSubview);
+}
+
+#pragma mark - 入口一：设置页最后一行（视图注入，不碰数据源）
+// v2.0 是往设置列表的「最后一段」追加一行，必须命中 UITableView 的 dataSource
+// 才能收到回调；迅雷设置页是 Swift 写的，这条路一旦不成立入口就彻底消失
+// （悬浮齿轮还在，说明注入本身没问题）。
+//
+// v2.1 改成视图级注入：找到设置页的 tableView，直接把 tableFooterView 换成
+// 自己的一条 —— 位置天然就是列表最后一行，不依赖 dataSource、不依赖段数，
+// App 换实现也不会失效。页面里没有 tableView 就退化成贴底的一条。
+
+#define XE_ENTRY_TITLE @"迅雷增强"
+#define XE_ENTRY_SUBTITLE @"去广告 · 开屏秒进 · 我的页净化"
+#define XE_ENTRY_HEIGHT 68.0
+
+static long gXESettingsHits = 0;      // 成功注入设置页的次数
+static NSString *gXEEntryPage = nil;  // 最近一次注入的 VC 类名（诊断用）
+static char kXEEntryAttachedKey;
+
+@interface XEEntryBar : UIControl
+@property (nonatomic, weak) UIViewController *host;
+- (void)xe_open;
+@end
+
+@implementation XEEntryBar {
+    UIView *_card;
+    UILabel *_title;
+    UILabel *_sub;
+    UIImageView *_arrow;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+
+    self.backgroundColor = [UIColor clearColor];
+
+    _card = [[UIView alloc] init];
+    _card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    _card.layer.cornerRadius = 10;
+    _card.layer.masksToBounds = YES;
+    _card.userInteractionEnabled = NO;
+    [self addSubview:_card];
+
+    _title = [[UILabel alloc] init];
+    _title.text = XE_ENTRY_TITLE;
+    _title.font = [UIFont systemFontOfSize:17];
+    _title.textColor = [UIColor labelColor];
+
+    _sub = [[UILabel alloc] init];
+    _sub.text = XE_ENTRY_SUBTITLE;
+    _sub.font = [UIFont systemFontOfSize:12];
+    _sub.textColor = [UIColor secondaryLabelColor];
+
+    _arrow = [[UIImageView alloc] init];
+    _arrow.image = [UIImage systemImageNamed:@"chevron.right"];
+    _arrow.tintColor = [UIColor tertiaryLabelColor];
+    _arrow.contentMode = UIViewContentModeScaleAspectFit;
+
+    [_card addSubview:_title];
+    [_card addSubview:_sub];
+    [_card addSubview:_arrow];
+
+    [self addTarget:self action:@selector(xe_open)
+   forControlEvents:UIControlEventTouchUpInside];
+    return self;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat w = self.bounds.size.width, h = self.bounds.size.height;
+    _card.frame = CGRectMake(16, 6, MAX(w - 32, 100), h - 12);
+    CGFloat cw = _card.bounds.size.width, ch = _card.bounds.size.height;
+    _title.frame = CGRectMake(14, ch / 2 - 20, cw - 52, 21);
+    _sub.frame = CGRectMake(14, ch / 2 + 2, cw - 52, 15);
+    _arrow.frame = CGRectMake(cw - 26, ch / 2 - 7, 12, 14);
+}
+
+- (void)xe_open {
+    XELog(@"open enhance panel from settings footer");
+    XEShowSettingsFrom(self.host);
+}
+
+@end
+
+static UITableView *XEFindTableView(UIView *root, int depth) {
+    if (!root || depth > 8) return nil;
+    if ([root isKindOfClass:[UITableView class]]) return (UITableView *)root;
+    for (UIView *sub in root.subviews) {
+        UITableView *tv = XEFindTableView(sub, depth + 1);
+        if (tv) return tv;
     }
     return nil;
 }
 
-#pragma mark 挂载
+static void XEAttachEntryTo(UIViewController *vc) {
+    if (!vc || ![vc isViewLoaded]) return;
+    NSString *cls = NSStringFromClass([vc class]);
+    if ([cls hasPrefix:@"XE"]) return;                          // 自己的面板
+    if (objc_getAssociatedObject(vc, &kXEEntryAttachedKey)) return;
 
-static BOOL XEClassOwnsSelector(Class cls, SEL sel) {
-    unsigned int n = 0;
-    Method *ms = class_copyMethodList(cls, &n);
-    BOOL found = NO;
-    for (unsigned int i = 0; i < n; i++) {
-        if (method_getName(ms[i]) == sel) { found = YES; break; }
+    CGFloat width = vc.view.bounds.size.width;
+    if (width < 100) width = [UIScreen mainScreen].bounds.size.width;
+
+    XEEntryBar *bar = [[XEEntryBar alloc] initWithFrame:CGRectMake(0, 0, width, XE_ENTRY_HEIGHT)];
+    bar.host = vc;
+    bar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+
+    UITableView *tv = XEFindTableView(vc.view, 0);
+    if (tv) {
+        UIView *old = tv.tableFooterView;
+        if (old && old.bounds.size.height > 1) {
+            CGFloat oh = old.bounds.size.height;
+            UIView *wrap = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, XE_ENTRY_HEIGHT + oh)];
+            wrap.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+            old.frame = CGRectMake(0, XE_ENTRY_HEIGHT, width, oh);
+            old.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+            [wrap addSubview:bar];
+            [wrap addSubview:old];
+            tv.tableFooterView = wrap;
+        } else {
+            tv.tableFooterView = bar;
+        }
+        [tv setNeedsLayout];
+    } else {
+        // 不是 tableView（RN / 自定义滚动视图）：贴底一条，照样点得到
+        bar.frame = CGRectMake(0, vc.view.bounds.size.height - XE_ENTRY_HEIGHT,
+                               width, XE_ENTRY_HEIGHT);
+        bar.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
+        [vc.view addSubview:bar];
     }
-    if (ms) free(ms);
-    return found;
+
+    // 导航栏再挂一个，双保险：设置页右上角「增强」
+    if (vc.navigationController && !vc.navigationItem.rightBarButtonItem) {
+        vc.navigationItem.rightBarButtonItem =
+            [[UIBarButtonItem alloc] initWithTitle:@"增强"
+                                             style:UIBarButtonItemStylePlain
+                                            target:bar
+                                            action:@selector(xe_open)];
+    }
+
+    objc_setAssociatedObject(vc, &kXEEntryAttachedKey, bar, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    gXESettingsHits++;
+    gXEEntryPage = cls;
+    XELog(@"settings entry injected into %@ (tableView=%@)", cls, tv ? @"Y" : @"N");
 }
 
-// 只有类「自己实现」了这三个核心方法才挂：否则说明列表数据源在别的对象上，
-// 挂在 VC 上永远收不到回调（这正是上一版入口不出现的典型原因之一）。
-static BOOL XEAddEntryClass(Class cls) {
-    if (!cls || gXEEntryCount >= XE_MAX_ENTRY_CLASSES) return NO;
-    for (int i = 0; i < gXEEntryCount; i++) {
-        if (gXEEntry[i].cls == cls) return NO;
+#pragma mark 探测
+
+static int gXEMineTicks = 0;
+
+static void XEProbeTick(void) {
+    UIViewController *top = XETopViewController();
+    if (!top) return;
+
+    NSString *cls = NSStringFromClass([top class]);
+    if (!cls || [cls hasPrefix:@"XE"]) return;
+
+    // 设置页：类名命中最稳，标题兜底（换语言 / 换实现也能进）
+    BOOL isSettings = [cls rangeOfString:@"Setting" options:NSCaseInsensitiveSearch].location != NSNotFound;
+    if (!isSettings) {
+        NSString *t = top.title;
+        isSettings = [t isEqualToString:@"设置"] || [t isEqualToString:@"設定"] ||
+                     [t isEqualToString:@"Settings"];
     }
-    if (!XEClassOwnsSelector(cls, @selector(tableView:numberOfRowsInSection:))) return NO;
-    if (!XEClassOwnsSelector(cls, @selector(tableView:cellForRowAtIndexPath:))) return NO;
-    if (!XEClassOwnsSelector(cls, @selector(tableView:didSelectRowAtIndexPath:))) return NO;
+    if (isSettings) XEAttachEntryTo(top);
 
-    XEEntryOrig *o = &gXEEntry[gXEEntryCount];
-    memset(o, 0, sizeof(*o));
-    o->cls = cls;
-
-    Method m;
-    if ((m = class_getInstanceMethod(cls, @selector(tableView:numberOfRowsInSection:))))
-        o->rows = method_setImplementation(m, (IMP)xe_rowCount);
-    if ((m = class_getInstanceMethod(cls, @selector(tableView:cellForRowAtIndexPath:))))
-        o->cell = method_setImplementation(m, (IMP)xe_cellForRow);
-    if ((m = class_getInstanceMethod(cls, @selector(tableView:didSelectRowAtIndexPath:))))
-        o->didSelect = method_setImplementation(m, (IMP)xe_didSelectRow);
-    if (XEClassOwnsSelector(cls, @selector(tableView:heightForRowAtIndexPath:)) &&
-        (m = class_getInstanceMethod(cls, @selector(tableView:heightForRowAtIndexPath:))))
-        o->height = method_setImplementation(m, (IMP)xe_rowHeight);
-    if (XEClassOwnsSelector(cls, @selector(tableView:canEditRowAtIndexPath:)) &&
-        (m = class_getInstanceMethod(cls, @selector(tableView:canEditRowAtIndexPath:))))
-        o->canEdit = method_setImplementation(m, (IMP)xe_canEditRow);
-    if (XEClassOwnsSelector(cls, @selector(tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:)) &&
-        (m = class_getInstanceMethod(cls, @selector(tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:))))
-        o->swipe = method_setImplementation(m, (IMP)xe_swipeActions);
-
-    gXEEntryCount++;
-    if (!gXEEntryNames) gXEEntryNames = [NSMutableArray array];
-    NSString *cname = [NSString stringWithUTF8String:class_getName(cls)];
-    [gXEEntryNames addObject:cname ?: @"?"];
-    return YES;
+    // 「我的」页：新进来的板块由 addSubview hook 拦，这里补一次全量扫（异步加载的）
+    if (XEMineCleanWanted() &&
+        ([cls rangeOfString:@"PersonalCenter" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+         [cls rangeOfString:@"Mine" options:NSCaseInsensitiveSearch].location != NSNotFound)) {
+        if (++gXEMineTicks % 4 == 1) XESweepMineView(top.view, 0);
+    }
 }
-
-static const char *kXESettingsClassNames[] = {
-    "_TtC8TDMVideo28CommonSettingsViewController",   // 迅雷 25.2.90「设置」页
-};
 
 static void XEInstallSettingsEntry(void) {
-    static BOOL done = NO;
-    static int tries = 0;
-    if (done || tries >= 5) return;
-    tries++;
-
-    for (size_t i = 0; i < sizeof(kXESettingsClassNames) / sizeof(char *); i++) {
-        Class cls = objc_getClass(kXESettingsClassNames[i]);
-        if (cls && XEAddEntryClass(cls)) {
-            XELog(@"entry row hooked on %s", kXESettingsClassNames[i]);
-        }
-    }
-
-    // 兜底：类名像「主设置页」的都试一遍（不问 青少年模式/隐私/字体 这些子页）
-    const char *suffix = "SettingsViewController";
-    size_t suffixLen = strlen(suffix);
-    unsigned int count = 0;
-    Class *list = objc_copyClassList(&count);
-    for (unsigned int i = 0; i < count; i++) {
-        const char *name = class_getName(list[i]);
-        if (!name) continue;
-        size_t len = strlen(name);
-        if (len < suffixLen || strcmp(name + len - suffixLen, suffix) != 0) continue;
-        if (!strstr(name, "Common") && !strstr(name, "General") && !strstr(name, "Main")) continue;
-        if (XEAddEntryClass(list[i])) XELog(@"entry row hooked on %s (scan)", name);
-    }
-    if (list) free(list);
-
-    // 只有真挂上了才算完成：类还没注册（或名字变了）时留待下次激活再试
-    if (gXEEntryCount > 0) done = YES;
-    XELog(@"settings entry classes: %@", gXEEntryNames);
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSTimer *timer = [NSTimer timerWithTimeInterval:0.5
+                                                    repeats:YES
+                                                      block:^(NSTimer *t) { XEProbeTick(); }];
+            timer.tolerance = 0.2;
+            [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+            XEProbeTick();
+        });
+    });
 }
 
 #pragma mark - 入口二：悬浮球
@@ -1075,9 +1264,10 @@ static void XEScheduleBeacon(void) {
 
         NSString *msg = [NSString stringWithFormat:
             @"dylib 已加载，hook %ld/%ld。\n\n"
-             @"入口有两个，任选其一：\n"
+             @"入口有三个，任选其一：\n"
              @"· 屏幕右侧悬浮齿轮\n"
-             @"· 我的 → 设置 → 列表最后一行「迅雷增强」",
+             @"· 我的 → 设置 → 列表最下面一行「迅雷增强」\n"
+             @"· 我的 → 设置 → 右上角「增强」",
             (long)gXEHookOK, (long)gXEHookTotal];
         UIAlertController *ac =
             [UIAlertController alertControllerWithTitle:
@@ -1114,10 +1304,13 @@ static NSString *XEDiagValue(NSString *kind) {
         return XEFloatVisible() ? @"已显示" : @"未显示";
     }
     if ([kind isEqualToString:@"classes"]) {
-        return gXEEntryNames.count ? [gXEEntryNames componentsJoinedByString:@"  "] : @"没找到";
+        return gXEEntryPage ? gXEEntryPage : @"还没进过设置页";
     }
     if ([kind isEqualToString:@"hits"]) {
         return [NSString stringWithFormat:@"%ld 次", gXESettingsHits];
+    }
+    if ([kind isEqualToString:@"mine"]) {
+        return [NSString stringWithFormat:@"%ld 块", gXEMineHidden];
     }
     return @"-";
 }
@@ -1125,12 +1318,13 @@ static NSString *XEDiagValue(NSString *kind) {
 static NSString *XEDiagReport(void) {
     return [NSString stringWithFormat:
         @"XunleiEnhance v%@\nbundle : %@\nhook : %ld/%ld\n"
-         @"入口类 : %@\n入口命中 : %ld\n悬浮球 : %@\nprefs : %@",
+         @"设置页 : %@（注入 %ld 次）\n我的页拦截 : %ld 块\n悬浮球 : %@\nprefs : %@",
         XE_VERSION,
         [[NSBundle mainBundle] bundleIdentifier],
         (long)gXEHookOK, (long)gXEHookTotal,
-        gXEEntryNames.count ? [gXEEntryNames componentsJoinedByString:@", "] : @"无",
+        gXEEntryPage ?: @"未命中",
         gXESettingsHits,
+        gXEMineHidden,
         XEFloatVisible() ? @"在屏" : @"未装",
         gXEPrefs];
 }
@@ -1171,6 +1365,13 @@ __attribute__((constructor)) static void XEInitialize(void) {
                     xe_mixSplashWillAppear, xe_orig_mixSplashWillAppear),
             XE_HOOK(ZYCustomizeSplashViewController, viewWillAppear:,
                     xe_customSplashWillAppear, xe_orig_customSplashWillAppear),
+            // 开屏秒进：启动链路 + 展示入口
+            XE_HOOK(XCSplashService,
+                    applicationDidFinishLaunchingWithSplashSlotTag:ext:,
+                    xe_splashLaunch, xe_orig_splashLaunch),
+            XE_HOOK(XCSplashView, showSplashAd:strategy:, xe_splashShow, xe_orig_splashShow),
+            XE_HOOK(XCSplashContainerViewController, viewWillAppear:,
+                    xe_splashContainerAppear, xe_orig_splashContainerAppear),
             // 开屏（第三方 / 聚合）
             XE_HOOK(GMSplashAd, showSplashViewInRootViewController:, xe_gmShowSplash, xe_orig_gmShowSplash),
             XE_HOOK(GMSplashAd, showCardViewInRootViewController:, xe_gmShowCard, xe_orig_gmShowCard),
@@ -1202,7 +1403,8 @@ __attribute__((constructor)) static void XEInitialize(void) {
         gXEHookTotal = total;
 
         // 三个入口各自独立：哪个环境不适用都不影响另外两个
-        XEInstallSettingsEntry();     // ① 迅雷「设置」列表末尾一行
+        XEInstallMineCleaner();       // 「我的」页板块拦截（视图挂载时判定）
+        XEInstallSettingsEntry();     // ① 设置页最后一行（视图注入）+ 页面探测
         XEInstallFloatingEntry();     // ② 悬浮齿轮（不依赖页面结构）
         XEScheduleBeacon();           // ③ 升级后首次启动自证一次
 
