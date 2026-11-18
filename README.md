@@ -1,8 +1,9 @@
 # 迅雷增强 · XunleiEnhance
 
 针对 **迅雷 iOS（`com.xunlei.mvideo`，25.2.90 / build 28156）** 的 TrollStore / 越狱 dylib 插件：
-去掉开屏与信息流广告、关掉摇一摇误触跳转。开关面板挂在 **迅雷 App 内的「设置」页最后一行**
-（点「迅雷增强」进入，开关样式），不需要 PreferenceLoader，也不需要连点版本号之类的隐藏手势。
+去掉开屏与信息流广告、关掉摇一摇误触跳转。开关面板**三个入口任选其一**（都不是隐藏手势）：
+屏幕右侧的**悬浮齿轮**、迅雷 **我的 → 设置 → 列表最后一行「迅雷增强」**、以及升级后首次启动的提示框。
+不需要 PreferenceLoader，也不需要连点版本号。
 
 * **零越狱依赖**：不用 Logos（Logos 会链 `CydiaSubstrate`，TrollStore 注入环境没有它），
   自带 `method_setImplementation` hook 运行时，dylib 只依赖 Foundation / UIKit / libobjc，
@@ -23,6 +24,8 @@
 | 关闭个性化广告推荐 | 开 | 等价于 App 内「广告设置 → 个性化推荐」关闭 | `XCAdConfigManager` |
 | 关闭摇一摇 / 扭一扭跳转 | 开 | 误触重灾区，配置层直接关掉 | `XCAdConfigModel` |
 | 限制广告自动跳转 | 开 | 禁止广告点击后自动唤起 App Store / 第三方 App | `XCAdConfigManager` |
+| 显示悬浮入口 | 开 | 右侧半透明齿轮，可拖动；关掉后只剩设置页那一行 | — |
+| 升级后提示已生效 | 开 | 每个版本首次启动弹一次，兼作注入自证 | — |
 | 输出调试日志 | 关 | `XunleiEnhance` 前缀日志，便于自查 | — |
 
 改开关即时热加载（Darwin 通知）；开屏相关的判断在下次启动迅雷时读取。
@@ -31,12 +34,16 @@
 
 ### A. TrollStore + TrollFools（推荐）
 
-1. 下载 `com.xiaolvmao.xunleienhance_1.1.0_iphoneos-arm.deb`（Releases 或 Actions 工件）
+1. 下载 `com.xiaolvmao.xunleienhance_2.0.0_iphoneos-arm.deb`（Releases 或 Actions 工件）
 2. **TrollFools** → `+` → 选这个 deb → 选「迅雷」→ 注入 → 重启迅雷
-3. 打开迅雷 → **我的 → 设置** → 拉到最底部 → **迅雷增强**
+3. 打开迅雷，**核对入口**：应在 2 秒内弹出「迅雷增强 v2.0.0 已生效」；
+   同时屏幕右侧出现半透明齿轮（可拖动，位置会记住）
 
-插件本体不需要 Substrate。设置入口就插在迅雷自己的设置列表里，纯 TrollStore 环境同样可用；
-偏好存在 App 容器内（`NSUserDefaults`），注入方式无关，不需要动 `/var/mobile/Library/Preferences`。
+如果没有弹窗、也没有齿轮，说明 **dylib 没被加载**（注入失败），与插件逻辑无关 ——
+换 TrollFools 版本重注入，或改用 `.tipa`。
+
+插件本体不需要 Substrate。偏好存在 App 容器内（`NSUserDefaults`），注入方式无关，
+不需要动 `/var/mobile/Library/Preferences`。
 
 越狱环境下 deb 的 `layout` 会装到系统里，此时**额外**会多一个「设置 → 迅雷增强」入口，
 两处改的是同一份配置。
@@ -68,26 +75,30 @@ export THEOS=~/theos
 make package FINALPACKAGE=1
 ```
 
-## 设置界面
+## 入口与设置面板
 
-入口在迅雷自己的设置列表里，作为**最后一行**出现（不改分组、不动行序，只多一行）：
+**三个入口互相独立**，任何一个失效都不影响另外两个：
+
+| # | 入口 | 依赖 | 说明 |
+| --- | --- | --- | --- |
+| ① | 迅雷 `我的 → 设置` 列表最后一行「迅雷增强 去广告 ›」 | 设置页类名 / 结构 | 最原生，跟着迅雷的设置页走 |
+| ② | 屏幕右侧半透明**悬浮齿轮** | 无（挂 keyWindow） | 版本更新也不会失效；可在面板里关掉 |
+| ③ | 升级后首次启动的「已生效」提示框 | 无 | 兼作注入是否成功的自证 |
 
 ```
-迅雷 → 我的 → 设置
-├── …（迅雷原有的设置项）
-└── 迅雷增强  去广告 ›        ← 插件加的那一行
-     │
-     └── 迅雷增强（开关面板）
-         ├─ 通用              1 个开关
-         ├─ 广告拦截          4 个开关
-         ├─ 深度屏蔽（激进）  1 个开关
-         ├─ 体验优化          3 个开关
-         ├─ 调试              1 个开关
-         └─ 恢复默认设置
+迅雷增强（开关面板）
+├─ 通用              启用迅雷增强
+├─ 广告拦截          去除开屏 / 信息流 / 预加载 / 卡片
+├─ 深度屏蔽（激进）  屏蔽全部广告位
+├─ 体验优化          关个性化 / 关摇一摇 / 限制自动跳转
+├─ 入口              显示悬浮入口 / 升级后提示
+├─ 调试              输出调试日志
+└─ 诊断              版本 · Hook 安装 · 入口状态 · 一键复制诊断文本
 ```
 
-实现方式：hook 迅雷设置页（`_TtC8TDMVideo28CommonSettingsViewController`，类名以
-`SettingsViewController` 结尾 + 带表格数据源特征，改名也能兜住）的 6 个索引路径方法，
+### ① 设置列表行是怎么插的
+
+hook 迅雷设置页（`_TtC8TDMVideo28CommonSettingsViewController`）的 6 个索引路径方法，
 把「多出来的那一行」拦下来，其余全部原样转发：
 
 | 方法 | 我们的处理 |
@@ -99,13 +110,27 @@ make package FINALPACKAGE=1
 | `tableView:canEditRowAtIndexPath:` | 该行禁止编辑 |
 | `tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:` | 该行无滑动菜单 |
 
+两个必须注意的点（v1.1.0 就是栽在这儿）：
+
+* **只挂「类自己实现」了数据源方法的类**（`class_copyMethodList` 判定）。若 VC 只是继承了
+  这些方法、真正的 dataSource 在别的对象上，挂在 VC 上永远收不到回调 —— 加了行也不会出现。
+* **orig 按类分表存**（`gXEEntry[]`），不是全局单例，否则多个设置页之间实现指针会串台。
+
+类名兜底：扫描「类名以 `SettingsViewController` 结尾且含 `Common`/`General`/`Main`」的类，
+最多重试 5 次（类注册得比 dylib 构造晚时仍能补上）。
+
+### 诊断
+
+面板最后一组实时显示：版本、hook 装上几项、设置页入口类名、设置页数据源被调用过几次
+（`设置页控制次数`）、悬浮入口是否在屏。整段可一键复制，排查时直接发出来即可判断是哪一环断了。
+
 其余文件：
 
 | 文件 | 作用 |
 | --- | --- |
-| `Tweak.m` | hook 运行时 + 广告拦截 + 设置面板（`XESettingsController`） |
+| `Tweak.m` | hook 运行时 + 广告拦截 + 三个入口 + 设置面板（`XESettingsController`） |
 | `layout/.../PreferenceLoader/Preferences/XunleiEnhance.plist` | 仅越狱：系统设置里的入口行 |
-| `layout/.../XunleiEnhancePrefs.bundle/Root.plist` | 仅越狱：系统设置里的二级页面 |
+| `layout/.../XunleiEnhancePrefs.bundle/Root.plist` | 仅越狱：系统设置里的二级页面（12 个开关） |
 
 偏好存储：**App 容器内的 `NSUserDefaults`（主）**，兼容读取
 `com.xunlei.mvideo.xunleienhance` 偏好域（越狱面板写入的值）。改动即时生效（Darwin 通知热加载）。
