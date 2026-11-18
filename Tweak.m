@@ -492,6 +492,7 @@ static NSString *XEDiagReport(void);
 static BOOL XEFloatVisible(void);
 static void XEInstallFloatingEntry(void);
 static void XEInstallSettingsEntry(void);
+static void XERefreshMineClean(void);
 
 @interface XESettingsController : UITableViewController
 - (void)xe_toast:(NSString *)text;
