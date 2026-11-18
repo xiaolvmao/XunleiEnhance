@@ -211,44 +211,49 @@ static void XEPrefsChanged(CFNotificationCenterRef center, void *observer, CFStr
 
 #pragma mark - 开屏广告（自渲染）
 // XC 自渲染开屏（ZY 系 VC）：出现后立刻关闭。
+// 用 performSelector:afterDelay: 而不是 block，避免 __weak 在 ObjC++ 下的类型转换问题。
 
-static void XECloseSplashVC(UIViewController *vc) {
-    if (!vc) return;
+%hook ZYMixSplashViewController
+- (void)xe_closeSplashAd {
     @try {
         SEL sel = NSSelectorFromString(@"closeAd");
-        if ([vc respondsToSelector:sel]) {
+        if ([self respondsToSelector:sel]) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [vc performSelector:sel];
+            [self performSelector:sel];
 #pragma clang diagnostic pop
-            XELog(@"closed self-rendered splash: %@", NSStringFromClass([vc class]));
+            XELog(@"closed self-rendered splash: %@", NSStringFromClass([self class]));
         }
     } @catch (NSException *e) {
         XELog(@"closeSplash exception: %@", e);
     }
 }
-
-%hook ZYMixSplashViewController
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     if (!XE_BlockSplash()) return;
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        XECloseSplashVC(weakSelf);
-    });
+    [self performSelector:@selector(xe_closeSplashAd) withObject:nil afterDelay:0.10];
 }
 %end
 
 %hook ZYCustomizeSplashViewController
+- (void)xe_closeSplashAd {
+    @try {
+        SEL sel = NSSelectorFromString(@"closeAd");
+        if ([self respondsToSelector:sel]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [self performSelector:sel];
+#pragma clang diagnostic pop
+            XELog(@"closed self-rendered splash: %@", NSStringFromClass([self class]));
+        }
+    } @catch (NSException *e) {
+        XELog(@"closeSplash exception: %@", e);
+    }
+}
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     if (!XE_BlockSplash()) return;
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        XECloseSplashVC(weakSelf);
-    });
+    [self performSelector:@selector(xe_closeSplashAd) withObject:nil afterDelay:0.10];
 }
 %end
 
