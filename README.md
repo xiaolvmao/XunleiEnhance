@@ -28,23 +28,29 @@
 | 关闭个性化广告推荐 | 开 | 等价于 App 内「广告设置 → 个性化推荐」关闭 | `XCAdConfigManager` |
 | 关闭摇一摇 / 扭一扭跳转 | 开 | 误触重灾区，配置层直接关掉 | `XCAdConfigModel` |
 | 限制广告自动跳转 | 开 | 禁止广告点击后自动唤起 App Store / 第三方 App | `XCAdConfigManager` |
-| 隐藏会员 / 充值推广 | 开 | 会员卡、充值 banner、快鸟试用条整块从布局里塌掉 | 视图层（`VipInfoItemView` / `VipInfoPopView` / `KuaiNiaoVipTryEntranceBar`） |
-| 隐藏游戏中心 | 开 | 游戏中心整块塌掉 | 视图层（`GameEntryView` / `GameCenterHeadView`） |
-| 隐藏运营推荐位 | 开 | banner、推荐位、活动卡整块塌掉 | 视图层（`RecommendItemView` / `BannerServiceCollectionCell` / `ActivityCardView`） |
+| 隐藏会员 / 充值推广 | 开 | 会员卡、充值 banner、快鸟试用条整块塌掉 | `VipInfoItemView` / `VipInfoPopView` / `KuaiNiaoVipTryEntranceBar` / `VipPrivilegeCardCollectionViewCell` |
+| 隐藏游戏中心 | 开 | 游戏中心整块塌掉 | `GameEntryView` / `GameCenterHeadView` / `GameCenterCell` |
+| 隐藏活动 / 运营卡 | 开 | 活动卡、运营位、签到/福利/任务卡整块塌掉 | `ActivityCardView` / `OperationCard` / `WelfareCard` 等 |
+| 隐藏推荐位 / banner | 开 | 推荐位与 banner 卡整块塌掉 | `RecommendItemView` / `BannerServiceCollectionCell` |
+| 隐藏云盘空间卡 | 关 | 云盘空间那块卡片（功能入口） | `CloudSpaceCardView` / `AssetsCard` |
+| 隐藏常用功能九宫格 | 关 | 入口九宫格与标题条（功能入口） | `EntranceItemView` / `EntranceTitleBar` |
+| 隐藏用户信息 / 资产区 | 关 | 头像昵称与资产统计区（功能区域） | `UserInfoSlider` |
+| 隐藏所有非功能板块 | 关 | 极简模式：按尺寸认板块，内置清单没覆盖到的也一并清掉，只留云盘/九宫格/用户信息/设置 | 视图层，仅在「我的」页生效 |
+| 启用自定义隐藏 | 关 | 填类名片段一起隐藏，兜住内置清单漏掉的板块 | 面板里手填，逗号分隔 |
 | 显示悬浮入口 | 开 | 右侧半透明齿轮，可拖动；关掉后只剩设置页那一行 | — |
 | 升级后提示已生效 | 开 | 每个版本首次启动弹一次，兼作注入自证 | — |
 | 输出调试日志 | 关 | `XunleiEnhance` 前缀日志，便于自查 | — |
 
-改开关即时热加载（Darwin 通知）；「我的」页净化是**在布局里摘掉**，关掉后需重进该页才恢复；
+改开关即时热加载（Darwin 通知）；「我的」页净化改完**重进该页**生效；
 开屏秒进在下次启动迅雷时读取。
 
 ## 安装
 
 ### A. TrollStore + TrollFools（推荐）
 
-1. 下载 `com.xiaolvmao.xunleienhance_2.2.1_iphoneos-arm.deb`（Releases 或 Actions 工件）
+1. 下载 `com.xiaolvmao.xunleienhance_2.3.0_iphoneos-arm.deb`（Releases 或 Actions 工件）
 2. **TrollFools** → `+` → 选这个 deb → 选「迅雷」→ 注入 → 重启迅雷
-3. 打开迅雷，**核对入口**：应在 2 秒内弹出「迅雷增强 v2.2.1 已生效」；
+3. 打开迅雷，**核对入口**：应在 2 秒内弹出「迅雷增强 v2.3.0 已生效」；
    同时屏幕右侧出现半透明齿轮（可拖动，位置会记住）
 
 如果没有弹窗、也没有齿轮，说明 **dylib 没被加载**（注入失败），与插件逻辑无关 ——
@@ -99,7 +105,10 @@ make package FINALPACKAGE=1
 迅雷增强（开关面板）
 ├─ 通用              启用迅雷增强
 ├─ 广告拦截          去除开屏 / 开屏秒进 / 信息流 / 预加载 / 卡片
-├─ 「我的」页净化    会员充值 / 游戏中心 / 运营推荐位（真正从布局移除）
+├─ 「我的」页推广    会员充值 / 游戏中心 / 活动运营 / 推荐位
+├─ 「我的」页功能    云盘卡 / 九宫格 / 用户信息（默认保留，可选隐藏）
+├─ 「我的」页极简    一键清掉所有非功能板块（兜底）
+├─ 「我的」页自定义  填类名片段，兜住内置清单漏掉的板块
 ├─ 深度屏蔽（激进）  屏蔽全部广告位
 ├─ 体验优化          关个性化 / 关摇一摇 / 限制自动跳转
 ├─ 入口              显示悬浮入口 / 升级后提示
@@ -132,44 +141,49 @@ v2.1 换成视图级注入，跟数据源完全无关：
 
 ```
 AccountContainerViewController          tab 上挂的容器，类名里没有 Mine
-  └─ _LayoutPersonalCenterViewController 真正的页面，纯 Swift 类
+  └─ PersonalCenterViewController       真正的页面（Swift，运行时才注册）
        ├─ 竖向堆叠的卡片（CardBaseView / ActivityCardView / VipInfoItemView …）
-       └─ 少量 UICollectionView（BannerServiceCollectionCell）
+       └─ 若干 UICollectionView（BannerServiceCollectionCell 等）
 ```
 
-v2.1 有两处硬伤，v2.2 都修掉了：
+三个坑，前两版各踩了一个：
 
-1. **作用域判定写错**：原来按 VC 类名找 `Mine` / `PersonalCenter`，可顶层是
+1. **作用域判定写错**（v2.1）：按 VC 类名找 `Mine` / `PersonalCenter`，可顶层是
    `AccountContainerViewController`，第一个 VC 不匹配就 `return NO` —— 等于把所有隐藏
-   全关掉。现在判定会往下钻一层看 child VC，且不再「第一个不匹配就放弃」。
-2. **只设 `hidden` 不改布局**：卡片自带固定高度约束，`hidden` 只是不绘制，位置照旧
-   占着，看起来就是「没隐藏」。现在命中后会把自身高度约束压到 0 并补一条 0 高度约束，
-   布局自己塌下去。
+   全关掉。v2.3 直接去掉这层判定：上面那些类名本来就只在个人中心出现，够特异。
+2. **摘视图树导致崩溃**（v2.2.0）：`removeFromSuperview` 把卡片摘走后，迅雷的 Swift
+   代码再遍历自己持有的数组时强制解包 → `_assertionFailure`。视图树属于 App，不能摘。
+3. **启动熔断把净化锁死**（v2.2.1，这就是「板块并没隐藏」的直接原因）：
+   熔断用「上次启动有没有活过 20 秒」判断崩溃，但用户装完立刻测、测完就退，
+   20 秒内退出就打不上存活标记，下次启动继续判「崩过」→ **永远熔断、永远不隐藏**。
+   v2.3 改成熔断最多触发一次，第二次启动一定恢复；阈值降到 6 秒；面板里还有
+   「重置保护状态」可以手动清掉。
 
-> **v2.2.0 曾经在这里用 `removeFromSuperview`，会闪退**：迅雷的 Swift 代码自己持有
-> 这些卡片视图，我们把它从视图树上摘走后，它遍历时强制解包就
-> `_assertionFailure`（崩溃栈是 `Sequence.forEach` → Swift 断言）。
-> 视图树属于 App，不能摘 —— v2.2.1 起只改尺寸，不动树。
+现在只做一件事：**改属性，不改结构**。
 
-所有改动都**排队到下一轮 runloop** 执行，不在 `addSubview` / `layoutSubviews` 的
-调用栈里改视图（那会和 App 自己的布局循环打架）。触发点有四个：
+- 命中板块后 `hidden = YES`，再把自身高度约束压到 0、补一条 0 高度兜底约束（优先级 990）；
+- frame 布局的卡片没有约束，就把 `frame.height` 直接压 0，并靠 `UIView layoutSubviews`
+  每次重新压一次（App 每次布局都会把 frame 写回来，只压一次等于没压）；
+- 在 `UIStackView` 里只设 `hidden`，stack 自己会塌成 0；
+- collection view 的 cell 优先向上取「整张卡」来隐藏；实在找不到才隐藏 cell 本身，
+  且不给自己打标（cell 会被复用池拉去显示别的板块）。
 
-- `viewDidAppear`（延迟 0.15s 等布局落定）
-- 0.3s 探针（服务端配置回来的板块是异步加的）
-- `UIView addSubview:` / `insertSubview:atIndex:`（卡片容器上屏时往下挖一层）
-- `UICollectionView layoutSubviews`（cell 是 layout 摆出来的，拦不到内部）
-
-cell 类不单独处理尺寸，改为把它所在的那张卡一起压掉。
-
-另外还有一个**启动熔断**：如果上一次启动没活过 20 秒（说明崩在启动阶段），这次启动会
-直接把「我的」页净化停掉，保证 App 能进去 —— 诊断里会显示「已自动停用」。正常使用
-（活过 20 秒）不会触发，下次启动自动恢复。
+所有改动都**排队到下一轮 runloop** 执行，不在 `addSubview` / `layoutSubviews` 的调用栈里
+改视图（那会和 App 自己的布局循环打架）。触发点：`addSubview:` / `insertSubview:atIndex:`
+（卡片上屏）、`UICollectionView layoutSubviews`（cell 是布局摆出来的）、0.3 秒轻量探针
+（服务端配置回来的板块是异步加的）。
 
 ### 诊断
 
-面板最后一组实时显示：版本、hook 装上几项、**最近一次注入的设置页类名与注入次数**、
-**「我的」页识别到哪个 VC、拦下了几块、视图树快照**、悬浮入口是否在屏。
-「我的页结构」那一项显示抓到的节点数，`复制诊断信息` 会把整棵树一起复制出来。整段可一键复制，排查时直接发出来即可判断是哪一环断了。
+面板最后一组实时显示：版本、hook 装上几项、设置页入口类名与注入次数、
+「我的」页识别到哪个 VC、拦下了几块、**当前这些板块的类名与尺寸**、视图树快照、
+净化保护状态、悬浮入口是否在屏。
+
+`复制诊断信息` 会把开关状态、板块清单、整棵视图树一起复制出来。如果有板块没被隐藏，
+把这段发出来就能直接看到漏掉的类名 —— 内置清单补进去，或者你自己在
+「编辑自定义类名」里填上就可以。
+
+「重置保护状态」用于万一净化被熔断停掉时手动复位。
 
 其余文件：
 

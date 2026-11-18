@@ -122,9 +122,9 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>按板块整块隐掉推广内容；云盘、离线、分享、收藏、设置这些功能入口不受影响。改动后重进「我的」页生效。</string>
+			<string>命中后整块从布局里塌掉，不留空白。改动后重进「我的」页生效。</string>
 			<key>label</key>
-			<string>「我的」页净化</string>
+			<string>「我的」页 · 推广板块</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -158,9 +158,85 @@
 			<key>defaults</key>
 			<string>com.xunlei.mvideo.xunleienhance</string>
 			<key>key</key>
-			<string>hideMinePromo</string>
+			<string>hideMineActivity</string>
 			<key>label</key>
-			<string>隐藏运营推荐位</string>
+			<string>隐藏活动 / 运营卡</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+			<key>key</key>
+			<string>hideMineFeed</string>
+			<key>label</key>
+			<string>隐藏推荐位 / banner</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>这些是功能入口，默认保留。想更干净可以关，代价是少一个入口。</string>
+			<key>label</key>
+			<string>「我的」页 · 功能板块</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+			<key>key</key>
+			<string>hideMineCloud</string>
+			<key>label</key>
+			<string>隐藏云盘空间卡</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+			<key>key</key>
+			<string>hideMineGrid</string>
+			<key>label</key>
+			<string>隐藏常用功能九宫格</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+			<key>key</key>
+			<string>hideMineUser</string>
+			<key>label</key>
+			<string>隐藏用户信息 / 资产区</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>兜底开关：内置类名没覆盖到的板块也一并清掉，只保留云盘、九宫格、用户信息、设置这些功能入口。</string>
+			<key>label</key>
+			<string>「我的」页 · 极简模式</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+			<key>key</key>
+			<string>hideMineAll</string>
+			<key>label</key>
+			<string>隐藏所有非功能板块</string>
 		</dict>
 		<dict>
 			<key>cell</key>
