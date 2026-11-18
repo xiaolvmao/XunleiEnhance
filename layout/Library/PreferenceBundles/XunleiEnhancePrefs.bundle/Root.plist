@@ -1,0 +1,186 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>title</key>
+	<string>迅雷增强</string>
+	<key>items</key>
+	<array>
+
+		<!-- ── 总开关 ── -->
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>总开关</string>
+			<key>footerText</key>
+			<string>关闭后本插件全部逻辑立即失效。改动即时热加载，开屏相关设置下次启动迅雷生效。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>启用迅雷增强</string>
+			<key>key</key>
+			<string>enabled</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+		</dict>
+
+		<!-- ── 广告拦截 ── -->
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>广告拦截</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>去除开屏广告</string>
+			<key>key</key>
+			<string>blockSplash</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>去除信息流广告</string>
+			<key>key</key>
+			<string>blockFeedAd</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>拦截广告预加载</string>
+			<key>key</key>
+			<string>blockAdLoad</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+			<key>footerText</key>
+			<string>从广告出价池取广告时直接返回空，广告请求与渲染都不会发生，同时省掉后台预加载流量。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>隐藏广告卡片</string>
+			<key>key</key>
+			<string>hideAdCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+			<key>footerText</key>
+			<string>信息流里的广告 cell 不再挂载广告内容（保留 cell 高度，避免列表布局错乱）。</string>
+		</dict>
+
+		<!-- ── 深度屏蔽 ── -->
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>深度屏蔽（激进）</string>
+			<key>footerText</key>
+			<string>直接清空可投放广告位并拒绝所有广告请求。效果最彻底；若出现页面空白、无法加载内容等情况请先关闭此项。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>屏蔽全部广告位</string>
+			<key>key</key>
+			<string>blockAllSlots</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+		</dict>
+
+		<!-- ── 体验优化 ── -->
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>体验优化</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>关闭个性化广告推荐</string>
+			<key>key</key>
+			<string>disablePersonalize</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+			<key>footerText</key>
+			<string>等价于 App 内「广告设置 → 个性化推荐」关闭，减少基于行为的精准投放。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>关闭摇一摇 / 扭一扭跳转</string>
+			<key>key</key>
+			<string>disableShake</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>限制广告自动跳转</string>
+			<key>key</key>
+			<string>limitAutoJump</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+			<key>footerText</key>
+			<string>禁止广告点击后自动唤起 App Store / 第三方 App。</string>
+		</dict>
+
+		<!-- ── 调试 ── -->
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>调试</string>
+			<key>footerText</key>
+			<string>开启后在「控制台」中可用 XunleiEnhance 过滤查看拦截日志。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>输出调试日志</string>
+			<key>key</key>
+			<string>debugLog</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.xunlei.mvideo.xunleienhance</string>
+		</dict>
+
+	</array>
+</dict>
+</plist>

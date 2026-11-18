@@ -1,0 +1,10 @@
+Package: com.xiaolvmao.xunleienhance
+Name: 迅雷增强
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: 迅雷去广告与功能增强（TrollStore / 越狱）
+Homepage: https://github.com/xiaolvmao/XunleiEnhance
+Maintainer: xiaolvmao
+Author: xiaolvmao
+Section: Tweaks
+Depends: firmware (>= 15.0)

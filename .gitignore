@@ -1,0 +1,10 @@
+.theos/
+.theos*/
+packages/
+out/
+*.o
+*.dylib
+*.deb
+*.tipa
+.DS_Store
+_analysis/

@@ -1,0 +1,66 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  THEOS: ${{ github.workspace }}/.theos-root
+  THEOS_PACKAGE_SCHEME: ''
+  FINALPACKAGE: 1
+
+jobs:
+  build:
+    name: Build .deb
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          clang --version | head -1
+
+      - name: Install host tools
+        run: |
+          brew install ldid xz dpkg
+
+      - name: Install Theos
+        run: |
+          mkdir -p "$THEOS"
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          mkdir -p "$THEOS/sdks"
+          curl -sL https://github.com/theos/sdks/archive/refs/heads/master.tar.gz \
+            | tar xz -C /tmp
+          cp -R /tmp/sdks-master/*.sdk "$THEOS/sdks/"
+          ls "$THEOS/sdks"
+          echo "NIC=$THEOS/bin" >> "$GITHUB_PATH"
+
+      - name: Build package
+        run: |
+          make package FINALPACKAGE=1 DEBUG=0
+          ls -la packages/
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          cp packages/*.deb out/
+          find .theos -name 'XunleiEnhance.dylib' -exec cp {} out/ \;
+          find .theos -name 'XunleiEnhancePrefs' -type f -exec cp {} out/XunleiEnhancePrefs.bundle.bin \;
+          ls -la out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: XunleiEnhance-${{ github.sha }}
+          path: out/*
+          if-no-files-found: error
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          generate_release_notes: true
