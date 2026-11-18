@@ -1,3 +1,5 @@
+include $(THEOS)/makefiles/common.mk
+
 BUNDLE_NAME = XunleiEnhancePrefs
 XunleiEnhancePrefs_FILES = XEPrefsListController.m
 XunleiEnhancePrefs_INSTALL_PATH = /Library/PreferenceBundles
