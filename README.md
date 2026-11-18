@@ -1,13 +1,14 @@
 # 迅雷增强 · XunleiEnhance
 
 针对 **迅雷 iOS（`com.xunlei.mvideo`，25.2.90 / build 28156）** 的 TrollStore / 越狱 dylib 插件：
-去掉开屏与信息流广告、关掉摇一摇误触跳转，所有开关放在 **设置 → 迅雷增强**（二级菜单，开关样式）。
+去掉开屏与信息流广告、关掉摇一摇误触跳转。开关面板挂在 **迅雷 App 内的「设置」页最后一行**
+（点「迅雷增强」进入，开关样式），不需要 PreferenceLoader，也不需要连点版本号之类的隐藏手势。
 
 * **零越狱依赖**：不用 Logos（Logos 会链 `CydiaSubstrate`，TrollStore 注入环境没有它），
   自带 `method_setImplementation` hook 运行时，dylib 只依赖 Foundation / UIKit / libobjc，
   可以直接被 TrollFools 注入。
-* **不猜类名**：24 个 hook 点全部从 `TDMVideo` 主二进制的 `__objc_classlist` 静态解析得到，
-  方法名 + 类型编码逐条核对（`tools/verify_hooks.py`，当前 24/24 通过）。
+* **不猜类名**：30 个 hook 点全部从 `TDMVideo` 主二进制的 `__objc_classlist` 静态解析得到，
+  方法名 + 类型编码逐条核对（`tools/verify_hooks.py`，当前 30/30 通过）。
 
 ## 功能
 
@@ -30,13 +31,15 @@
 
 ### A. TrollStore + TrollFools（推荐）
 
-1. 下载 `com.xiaolvmao.xunleienhance_1.0.0_iphoneos-arm.deb`（Releases 或 Actions 工件）
+1. 下载 `com.xiaolvmao.xunleienhance_1.1.0_iphoneos-arm.deb`（Releases 或 Actions 工件）
 2. **TrollFools** → `+` → 选这个 deb → 选「迅雷」→ 注入 → 重启迅雷
+3. 打开迅雷 → **我的 → 设置** → 拉到最底部 → **迅雷增强**
 
-插件本体不需要 Substrate。设置入口需要 PreferenceLoader 环境（越狱设备天然具备）；
-纯 TrollStore 设备上插件按默认配置直接生效，要改配置可编辑
-`/var/mobile/Library/Preferences/com.xunlei.mvideo.xunleienhance.plist`（TrollStore 应用带
-`platform-application` 权限，沙盒内可读）。
+插件本体不需要 Substrate。设置入口就插在迅雷自己的设置列表里，纯 TrollStore 环境同样可用；
+偏好存在 App 容器内（`NSUserDefaults`），注入方式无关，不需要动 `/var/mobile/Library/Preferences`。
+
+越狱环境下 deb 的 `layout` 会装到系统里，此时**额外**会多一个「设置 → 迅雷增强」入口，
+两处改的是同一份配置。
 
 ### B. 打包成 .tipa（macOS）
 
@@ -67,23 +70,45 @@ make package FINALPACKAGE=1
 
 ## 设置界面
 
+入口在迅雷自己的设置列表里，作为**最后一行**出现（不改分组、不动行序，只多一行）：
+
 ```
-设置
-└── 迅雷增强                ← 二级菜单入口（PreferenceLoader）
-    ├─ 总开关              1 个开关
-    ├─ 广告拦截            4 个开关
-    ├─ 深度屏蔽（激进）    1 个开关
-    ├─ 体验优化            3 个开关
-    └─ 调试                1 个开关
+迅雷 → 我的 → 设置
+├── …（迅雷原有的设置项）
+└── 迅雷增强  去广告 ›        ← 插件加的那一行
+     │
+     └── 迅雷增强（开关面板）
+         ├─ 通用              1 个开关
+         ├─ 广告拦截          4 个开关
+         ├─ 深度屏蔽（激进）  1 个开关
+         ├─ 体验优化          3 个开关
+         ├─ 调试              1 个开关
+         └─ 恢复默认设置
 ```
+
+实现方式：hook 迅雷设置页（`_TtC8TDMVideo28CommonSettingsViewController`，类名以
+`SettingsViewController` 结尾 + 带表格数据源特征，改名也能兜住）的 6 个索引路径方法，
+把「多出来的那一行」拦下来，其余全部原样转发：
+
+| 方法 | 我们的处理 |
+| --- | --- |
+| `tableView:numberOfRowsInSection:` | 第 0 段 +1 |
+| `tableView:cellForRowAtIndexPath:` | 该行返回自建 cell（`迅雷增强 / 去广告 ›`） |
+| `tableView:didSelectRowAtIndexPath:` | 该行 push 插件面板 |
+| `tableView:heightForRowAtIndexPath:` | 该行复用首行高度 |
+| `tableView:canEditRowAtIndexPath:` | 该行禁止编辑 |
+| `tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:` | 该行无滑动菜单 |
+
+其余文件：
 
 | 文件 | 作用 |
 | --- | --- |
-| `layout/.../PreferenceLoader/Preferences/XunleiEnhance.plist` | 设置里的入口行 |
-| `layout/.../XunleiEnhancePrefs.bundle/Root.plist` | 二级页面，全部 `PSSwitchCell` |
-| `XunleiEnhancePrefs/XEPrefsListController.m` | 变更后发 `com.xiaolvmao.xunleienhance/reload` 热加载 |
+| `Tweak.m` | hook 运行时 + 广告拦截 + 设置面板（`XESettingsController`） |
+| `layout/.../PreferenceLoader/Preferences/XunleiEnhance.plist` | 仅越狱：系统设置里的入口行 |
+| `layout/.../XunleiEnhancePrefs.bundle/Root.plist` | 仅越狱：系统设置里的二级页面 |
 
-偏好域：`com.xunlei.mvideo.xunleienhance`。
+偏好存储：**App 容器内的 `NSUserDefaults`（主）**，兼容读取
+`com.xunlei.mvideo.xunleienhance` 偏好域（越狱面板写入的值）。改动即时生效（Darwin 通知热加载）。
 
 ## 技术说明
 

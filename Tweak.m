@@ -19,6 +19,7 @@
 
 #define XE_PREF_DOMAIN_STR "com.xunlei.mvideo.xunleienhance"
 #define XE_NOTIFY_STR "com.xiaolvmao.xunleienhance/reload"
+#define XE_VERSION @"1.1.0"
 
 static NSDictionary *gXEPrefs = nil;
 
@@ -32,7 +33,31 @@ static inline void XELog(NSString *fmt, ...) {
     NSLog(@"[XunleiEnhance] %@", msg);
 }
 
-#pragma mark - 偏好读取
+#pragma mark - 偏好存储
+// TrollStore / TrollFools 注入时，deb 里的 PreferenceBundle 根本不会落到
+// /Library/PreferenceBundles，系统「设置」里不会有入口；沙盒进程也未必写得进
+// /var/mobile/Library/Preferences。所以偏好主存储放在 App 自己的
+// NSUserDefaults（容器内，任何注入方式都能读写），越狱偏好域只作兼容读源。
+
+static NSDictionary *XEDefaults(void) {
+    static NSDictionary *d = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        d = @{
+            @"enabled": @YES,
+            @"blockSplash": @YES,
+            @"blockFeedAd": @YES,
+            @"blockAdLoad": @YES,
+            @"hideAdCell": @YES,
+            @"blockAllSlots": @NO,
+            @"disablePersonalize": @YES,
+            @"disableShake": @YES,
+            @"limitAutoJump": @YES,
+            @"debugLog": @NO,
+        };
+    });
+    return d;
+}
 
 static NSString *XEPrefFilePath(void) {
     static NSArray<NSString *> *paths = nil;
@@ -50,14 +75,10 @@ static NSString *XEPrefFilePath(void) {
 }
 
 static void XEReloadPrefs(void) {
-    NSMutableDictionary *dict = [NSMutableDictionary dictionary];
-    NSArray<NSString *> *keys = @[
-        @"enabled", @"blockSplash", @"blockFeedAd", @"blockAdLoad", @"hideAdCell",
-        @"blockAllSlots", @"disablePersonalize", @"disableShake", @"limitAutoJump",
-        @"debugLog"
-    ];
+    NSMutableDictionary *dict = [XEDefaults() mutableCopy];
+    NSArray<NSString *> *keys = [XEDefaults() allKeys];
 
-    // 1) CFPreferences（越狱环境最可靠）
+    // 1) 越狱偏好域（/Library/PreferenceBundles 面板写入的值）
     for (NSString *k in keys) {
         CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)k,
                                                        CFSTR(XE_PREF_DOMAIN_STR));
@@ -65,15 +86,61 @@ static void XEReloadPrefs(void) {
     }
 
     // 2) 兜底：直接读 plist（沙盒内 CFPreferences 被重定向时使用）
-    if (dict.count == 0) {
-        NSString *path = XEPrefFilePath();
-        if (path) {
-            NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:path];
-            if (d) [dict addEntriesFromDictionary:d];
+    NSString *path = XEPrefFilePath();
+    if (path) {
+        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:path];
+        if (d) {
+            for (NSString *k in keys) {
+                if (d[k]) dict[k] = d[k];
+            }
         }
     }
 
+    // 3) App 内设置面板（最高优先级）：写在 App 自己的 NSUserDefaults 里
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    for (NSString *k in keys) {
+        id v = [ud objectForKey:k];
+        if (v) dict[k] = v;
+    }
+
     gXEPrefs = [dict copy];
+}
+
+static void XEPrefsDidChange(void) {
+    XEReloadPrefs();
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR(XE_NOTIFY_STR), NULL, NULL, true);
+}
+
+// 面板里改一个开关：先写 App 内存储（一定成功），再尽力同步到越狱偏好域，
+// 这样越狱环境下系统设置面板里看到的也是同一个值。
+static void XESavePref(NSString *key, id value) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setObject:value forKey:key];
+    [ud synchronize];
+    @try {
+        CFPreferencesSetAppValue((__bridge CFStringRef)key,
+                                 (__bridge CFPropertyListRef)value,
+                                 CFSTR(XE_PREF_DOMAIN_STR));
+        CFPreferencesAppSynchronize(CFSTR(XE_PREF_DOMAIN_STR));
+    } @catch (NSException *e) {
+        // 沙盒内写全局偏好域会被拒，忽略即可
+    }
+    XEPrefsDidChange();
+    XELog(@"pref %@ = %@", key, value);
+}
+
+static void XEResetPrefs(void) {
+    for (NSString *k in [XEDefaults() allKeys]) {
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:k];
+        @try {
+            CFPreferencesSetAppValue((__bridge CFStringRef)k, NULL, CFSTR(XE_PREF_DOMAIN_STR));
+        } @catch (NSException *e) {
+        }
+    }
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    CFPreferencesAppSynchronize(CFSTR(XE_PREF_DOMAIN_STR));
+    XEPrefsDidChange();
 }
 
 static BOOL XEBool(NSString *key, BOOL fallback) {
@@ -110,18 +177,25 @@ typedef struct {
 #define XE_HOOK(C, S, IMPL, ORIG) { #C, #S, (IMP)(IMPL), (IMP *)&(ORIG) }
 
 // 装一个 hook：类或方法不存在就跳过并记录（不同版本不至于崩）
+static BOOL XEInstallOn(Class cls, const char *selName, IMP imp, IMP *orig) {
+    if (!cls || !selName) return NO;
+    Method m = class_getInstanceMethod(cls, sel_registerName(selName));
+    if (!m) return NO;
+    IMP prev = method_setImplementation(m, imp);
+    if (orig && *orig == NULL) *orig = prev;
+    return YES;
+}
+
 static BOOL XEInstall(XEHookEntry e) {
     Class cls = objc_getClass(e.cls);
     if (!cls) {
         XELog(@"skip %s (class not found)", e.cls);
         return NO;
     }
-    Method m = class_getInstanceMethod(cls, sel_registerName(e.sel));
-    if (!m) {
+    if (!XEInstallOn(cls, e.sel, e.imp, e.orig)) {
         XELog(@"skip %s %s (method not found)", e.cls, e.sel);
         return NO;
     }
-    *e.orig = method_setImplementation(m, e.imp);
     return YES;
 }
 
@@ -324,6 +398,346 @@ static void xe_mountAdView(id self, SEL _cmd, id adView) {
     xe_orig_mountAdView(self, _cmd, adView);
 }
 
+#pragma mark - App 内设置面板
+//
+// 注入环境里没有 PreferenceLoader（deb 的 layout 不会被安装），系统「设置」
+// 里不会有入口。所以入口改放到迅雷自己的「设置」页：在这个列表末尾追加一行
+// 「迅雷增强」，点进去是插件自己的开关面板。不需要任何隐藏手势。
+
+static NSInteger gXEHookOK = 0;
+static NSInteger gXEHookTotal = 0;
+
+static char kXESwitchKey;   // 关联对象 key
+
+@interface XESettingsController : UITableViewController
+@end
+
+static NSArray *XEPanelSpec(void) {
+    static NSArray *spec = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        spec = @[
+            @{ @"title": @"通用",
+               @"footer": @"关掉总开关等于停用整个插件，各开关的设置会保留。",
+               @"items": @[ @{ @"key": @"enabled", @"title": @"启用迅雷增强" } ] },
+
+            @{ @"title": @"广告拦截",
+               @"footer": @"开屏、信息流、预加载、卡片挂载四个入口一起拦截。",
+               @"items": @[
+                   @{ @"key": @"blockSplash", @"title": @"去除开屏广告" },
+                   @{ @"key": @"blockFeedAd", @"title": @"去除信息流广告" },
+                   @{ @"key": @"blockAdLoad", @"title": @"拦截广告预加载" },
+                   @{ @"key": @"hideAdCell", @"title": @"隐藏广告卡片" },
+               ] },
+
+            @{ @"title": @"深度屏蔽（激进）",
+               @"footer": @"直接清空广告位配置，最彻底；个别页面可能因为没有广告内容而留白。默认关闭。",
+               @"items": @[ @{ @"key": @"blockAllSlots", @"title": @"屏蔽全部广告位" } ] },
+
+            @{ @"title": @"体验优化",
+               @"footer": @"关闭个性化推荐、关掉摇一摇/扭一扭跳转，并限制广告自动唤起。",
+               @"items": @[
+                   @{ @"key": @"disablePersonalize", @"title": @"关闭个性化广告推荐" },
+                   @{ @"key": @"disableShake", @"title": @"关闭摇一摇 / 扭一扭" },
+                   @{ @"key": @"limitAutoJump", @"title": @"限制广告自动跳转" },
+               ] },
+
+            @{ @"title": @"调试",
+               @"footer": @"把 [XunleiEnhance] 日志打到控制台（Console / idevicesyslog）。",
+               @"items": @[ @{ @"key": @"debugLog", @"title": @"输出调试日志" } ] },
+
+            @{ @"title": @"",
+               @"footer": @"",
+               @"items": @[ @{ @"action": @"reset", @"title": @"恢复默认设置" } ] },
+        ];
+    });
+    return spec;
+}
+
+@implementation XESettingsController
+
+- (instancetype)init {
+    if (@available(iOS 13.0, *)) {
+        return [super initWithStyle:UITableViewStyleInsetGrouped];
+    }
+    return [super initWithStyle:UITableViewStyleGrouped];
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"迅雷增强";
+    if (self.navigationController.presentingViewController &&
+        self.navigationController.viewControllers.firstObject == self) {
+        self.navigationItem.leftBarButtonItem =
+            [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemClose
+                                                          target:self
+                                                          action:@selector(xe_close)];
+    }
+}
+
+- (void)xe_close {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (NSArray *)xe_spec { return XEPanelSpec(); }
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    NSArray *spec = [self xe_spec];
+    return (NSInteger)spec.count;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    NSArray *spec = [self xe_spec];
+    return (NSInteger)[spec[section][@"items"] count];
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    NSArray *spec = [self xe_spec];
+    NSString *t = spec[section][@"title"];
+    return t.length ? t : nil;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    NSArray *spec = [self xe_spec];
+    if (section == (NSInteger)spec.count - 1) {
+        return [NSString stringWithFormat:@"迅雷增强 v%@ · hook %ld/%ld\n改动即时生效，无需重启",
+                XE_VERSION, (long)gXEHookOK, (long)gXEHookTotal];
+    }
+    NSString *f = spec[section][@"footer"];
+    return f.length ? f : nil;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSArray *spec = [self xe_spec];
+    NSDictionary *item = spec[indexPath.section][@"items"][indexPath.row];
+
+    if (item[@"action"]) {
+        static NSString *rid = @"XEActionCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:rid];
+        if (!cell) {
+            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                         reuseIdentifier:rid];
+            cell.textLabel.textAlignment = NSTextAlignmentCenter;
+            cell.textLabel.textColor = [UIColor systemRedColor];
+        }
+        cell.textLabel.text = item[@"title"];
+        return cell;
+    }
+
+    static NSString *rid = @"XESwitchCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:rid];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                     reuseIdentifier:rid];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        UISwitch *sw = [[UISwitch alloc] init];
+        [sw addTarget:self
+               action:@selector(xe_switchChanged:)
+     forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = sw;
+    }
+
+    NSString *key = item[@"key"];
+    cell.textLabel.text = item[@"title"];
+    UISwitch *sw = (UISwitch *)cell.accessoryView;
+    objc_setAssociatedObject(sw, &kXESwitchKey, key, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    // 总开关关闭时，其余开关降级显示但保持可改
+    sw.on = [gXEPrefs[key] boolValue];
+    sw.enabled = [key isEqualToString:@"enabled"] || XEEnabled();
+    return cell;
+}
+
+- (void)xe_switchChanged:(UISwitch *)sw {
+    NSString *key = objc_getAssociatedObject(sw, &kXESwitchKey);
+    if (key) XESavePref(key, @(sw.isOn));
+    if ([key isEqualToString:@"enabled"]) {
+        [self.tableView reloadData];
+    }
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    NSArray *spec = [self xe_spec];
+    NSDictionary *item = spec[indexPath.section][@"items"][indexPath.row];
+    if (!item[@"action"]) return;
+
+    XEResetPrefs();
+    [tableView reloadData];
+
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"已恢复默认设置"
+                                                              message:nil
+                                                       preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:ac animated:YES completion:^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.9 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [ac dismissViewControllerAnimated:YES completion:nil];
+        });
+    }];
+}
+
+@end
+
+static void XEShowSettingsFrom(UIViewController *from) {
+    if (!from) return;
+    XESettingsController *vc = [[XESettingsController alloc] init];
+    UINavigationController *nav = from.navigationController;
+    if (nav && nav.view.window && !nav.isBeingDismissed) {
+        [nav pushViewController:vc animated:YES];
+        return;
+    }
+    UINavigationController *wrapper = [[UINavigationController alloc] initWithRootViewController:vc];
+    if ([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad) {
+        wrapper.modalPresentationStyle = UIModalPresentationFormSheet;
+    }
+    [from presentViewController:wrapper animated:YES completion:nil];
+}
+
+#pragma mark - 设置页入口：往迅雷设置列表末尾追加一行
+// 只碰「多出来那一行」的 6 个索引路径方法，其余原样转发给原实现，
+// 所以不会打乱迅雷自己的分组与行序。
+
+static Class xe_entryClass = Nil;
+static NSInteger (*xe_orig_rowCount)(id, SEL, UITableView *, NSInteger);
+static UITableViewCell *(*xe_orig_cellForRow)(id, SEL, UITableView *, NSIndexPath *);
+static void (*xe_orig_didSelectRow)(id, SEL, UITableView *, NSIndexPath *);
+static double (*xe_orig_rowHeight)(id, SEL, UITableView *, NSIndexPath *);
+static BOOL (*xe_orig_canEditRow)(id, SEL, UITableView *, NSIndexPath *);
+static id (*xe_orig_swipeActions)(id, SEL, UITableView *, NSIndexPath *);
+
+#define XE_ENTRY_SECTION 0
+#define XE_ENTRY_TITLE @"迅雷增强"
+
+static NSInteger XEAppRowCount(id self, UITableView *tv) {
+    if (!xe_orig_rowCount) return 0;
+    return xe_orig_rowCount(self, @selector(tableView:numberOfRowsInSection:),
+                            tv, XE_ENTRY_SECTION);
+}
+
+static BOOL XEIsEntryRow(id self, UITableView *tv, NSIndexPath *ip) {
+    if (!ip || ip.section != XE_ENTRY_SECTION) return NO;
+    return ip.row == XEAppRowCount(self, tv);
+}
+
+static NSInteger xe_rowCount(id self, SEL _cmd, UITableView *tv, NSInteger section) {
+    NSInteger n = xe_orig_rowCount(self, _cmd, tv, section);
+    return (section == XE_ENTRY_SECTION) ? n + 1 : n;
+}
+
+static UITableViewCell *xe_cellForRow(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (!XEIsEntryRow(self, tv, ip)) return xe_orig_cellForRow(self, _cmd, tv, ip);
+
+    static NSString *rid = @"XunleiEnhanceEntry";
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:rid];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1
+                                     reuseIdentifier:rid];
+        cell.textLabel.text = XE_ENTRY_TITLE;
+        cell.detailTextLabel.text = @"去广告";
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    }
+    return cell;
+}
+
+static void xe_didSelectRow(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (!XEIsEntryRow(self, tv, ip)) {
+        xe_orig_didSelectRow(self, _cmd, tv, ip);
+        return;
+    }
+    [tv deselectRowAtIndexPath:ip animated:YES];
+    XELog(@"open enhance settings panel");
+    XEShowSettingsFrom(self);
+}
+
+static double xe_rowHeight(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (!XEIsEntryRow(self, tv, ip)) return xe_orig_rowHeight(self, _cmd, tv, ip);
+    double h = 0;
+    if (xe_orig_rowHeight) {
+        h = xe_orig_rowHeight(self, _cmd, tv, [NSIndexPath indexPathForRow:0 inSection:0]);
+    }
+    // -1 是 UITableViewAutomaticDimension，说明按约束自适应，给个固定值更稳
+    if (!(h > 30) || h > 100) h = 54;
+    return h;
+}
+
+static BOOL xe_canEditRow(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (XEIsEntryRow(self, tv, ip)) return NO;
+    return xe_orig_canEditRow(self, _cmd, tv, ip);
+}
+
+static id xe_swipeActions(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (XEIsEntryRow(self, tv, ip)) return nil;
+    return xe_orig_swipeActions(self, _cmd, tv, ip);
+}
+
+static int XEInstallEntryHooksOn(Class cls) {
+    if (!cls) return 0;
+    if (xe_orig_rowCount && cls != xe_entryClass) return 0;   // 只挂一个类，避免 orig 串台
+    int n = 0;
+    if (XEInstallOn(cls, "tableView:numberOfRowsInSection:",
+                    (IMP)xe_rowCount, (IMP *)&xe_orig_rowCount)) n++;
+    if (XEInstallOn(cls, "tableView:cellForRowAtIndexPath:",
+                    (IMP)xe_cellForRow, (IMP *)&xe_orig_cellForRow)) n++;
+    if (XEInstallOn(cls, "tableView:didSelectRowAtIndexPath:",
+                    (IMP)xe_didSelectRow, (IMP *)&xe_orig_didSelectRow)) n++;
+    if (XEInstallOn(cls, "tableView:heightForRowAtIndexPath:",
+                    (IMP)xe_rowHeight, (IMP *)&xe_orig_rowHeight)) n++;
+    if (XEInstallOn(cls, "tableView:canEditRowAtIndexPath:",
+                    (IMP)xe_canEditRow, (IMP *)&xe_orig_canEditRow)) n++;
+    if (XEInstallOn(cls, "tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:",
+                    (IMP)xe_swipeActions, (IMP *)&xe_orig_swipeActions)) n++;
+    if (n > 0) { xe_entryClass = cls; }
+    return n;
+}
+
+static BOOL XEClassHasEntrySelectors(Class cls) {
+    static const char *sels[] = {
+        "tableView:numberOfRowsInSection:",
+        "tableView:cellForRowAtIndexPath:",
+        "tableView:didSelectRowAtIndexPath:",
+        "tableView:heightForRowAtIndexPath:",
+        "tableView:canEditRowAtIndexPath:",
+        "tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:",
+    };
+    for (int i = 0; i < (int)(sizeof(sels) / sizeof(sels[0])); i++) {
+        if (!class_getInstanceMethod(cls, sel_registerName(sels[i]))) return NO;
+    }
+    return YES;
+}
+
+static const char *kXESettingsClassNames[] = {
+    "_TtC8TDMVideo28CommonSettingsViewController",   // 迅雷 25.2.90「设置」页
+};
+
+static void XEInstallSettingsEntry(void) {
+    if (xe_orig_rowCount) return;   // 已经挂上
+
+    for (size_t i = 0; i < sizeof(kXESettingsClassNames) / sizeof(char *); i++) {
+        Class cls = objc_getClass(kXESettingsClassNames[i]);
+        if (cls && XEInstallEntryHooksOn(cls) > 0) {
+            XELog(@"entry hooks installed on %s", kXESettingsClassNames[i]);
+            return;
+        }
+    }
+
+    // 版本改名兜底：扫「类名以 SettingsViewController 结尾 + 六个方法全在」的类
+    const char *suffix = "SettingsViewController";
+    size_t suffixLen = strlen(suffix);
+    unsigned int count = 0;
+    Class *list = objc_copyClassList(&count);
+    for (unsigned int i = 0; i < count; i++) {
+        const char *name = class_getName(list[i]);
+        if (!name) continue;
+        size_t len = strlen(name);
+        if (len < suffixLen || strcmp(name + len - suffixLen, suffix) != 0) continue;
+        if (!XEClassHasEntrySelectors(list[i])) continue;
+        if (XEInstallEntryHooksOn(list[i]) > 0) {
+            XELog(@"entry hooks installed on %s (fallback)", name);
+            break;
+        }
+    }
+    free(list);
+}
+
 #pragma mark - 安装
 
 __attribute__((constructor)) static void XEInitialize(void) {
@@ -386,6 +800,12 @@ __attribute__((constructor)) static void XEInitialize(void) {
                                         NULL, XEPrefsChanged,
                                         CFSTR(XE_NOTIFY_STR), NULL,
                                         CFNotificationSuspensionBehaviorDeliverImmediately);
+
+        gXEHookOK = ok;
+        gXEHookTotal = total;
+
+        // 设置入口：往迅雷「设置」列表插一行（不需要 PreferenceLoader）
+        XEInstallSettingsEntry();
 
         XELog(@"installed %d/%d hooks, prefs=%@", ok, total, gXEPrefs);
         if (!gXEPrefs[@"debugLog"]) {

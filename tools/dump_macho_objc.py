@@ -159,6 +159,9 @@ def main():
             src = open(tweak, encoding="utf-8").read()
             src = re.sub(r"^\s*#define[^\n]*", "", src, flags=re.M)
             used = set(re.findall(r"XE_HOOK\(\s*([A-Za-z_]\w*)\s*,", src))
+            # 设置入口是运行时按类名动态挂的，不在 XE_HOOK 表里，单独收进来
+            for block in re.findall(r"kXESettingsClassNames\[\]\s*=\s*\{(.*?)\};", src, re.S):
+                used |= set(re.findall(r'"([^"]+)"', block))
 
     classes = {}
     for i in range(list_size // 8):

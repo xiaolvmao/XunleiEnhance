@@ -2,9 +2,28 @@
  "_meta": {
   "binary": "TDMVideo",
   "source": "__objc_classlist 静态解析",
-  "classCount": 11
+  "classCount": 12
  },
  "classes": {
+  "_TtC8TDMVideo28CommonSettingsViewController": {
+   "super": null,
+   "methods": {
+    "tableView:heightForRowAtIndexPath:": "d32@0:8@16@24",
+    "tableView:didSelectRowAtIndexPath:": "v32@0:8@16@24",
+    "tableView:numberOfRowsInSection:": "q32@0:8@16q24",
+    "tableView:canEditRowAtIndexPath:": "B32@0:8@16@24",
+    "tableView:trailingSwipeActionsConfigurationForRowAtIndexPath:": "@32@0:8@16@24",
+    "tableView:cellForRowAtIndexPath:": "@32@0:8@16@24",
+    "dealloc": "v16@0:8",
+    "initWithCoder:": "@24@0:8@16",
+    "viewDidLoad": "v16@0:8",
+    "viewDidAppear:": "v20@0:8B16",
+    "viewWillAppear:": "v20@0:8B16",
+    "onClickCloseBtn": "v16@0:8",
+    "initWithNibName:bundle:": "@32@0:8@16@24",
+    ".cxx_destruct": "v16@0:8"
+   }
+  },
   "GMSplashAd": {
    "super": "GMBaseConversionAd",
    "methods": {
