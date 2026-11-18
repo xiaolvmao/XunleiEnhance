@@ -20,7 +20,7 @@
 
 #define XE_PREF_DOMAIN_STR "com.xunlei.mvideo.xunleienhance"
 #define XE_NOTIFY_STR "com.xiaolvmao.xunleienhance/reload"
-#define XE_VERSION @"2.1.0"
+#define XE_VERSION @"2.2.0"
 
 static NSDictionary *gXEPrefs = nil;
 
@@ -557,6 +557,8 @@ static NSArray *XEPanelSpec(void) {
                    @{ @"info": @"classes", @"title": @"设置页入口" },
                    @{ @"info": @"hits", @"title": @"设置页注入次数" },
                    @{ @"info": @"mine", @"title": @"我的页拦截" },
+                   @{ @"info": @"minepage", @"title": @"我的页识别" },
+                   @{ @"info": @"minetree", @"title": @"我的页结构" },
                    @{ @"action": @"copydiag", @"title": @"复制诊断信息" },
                ] },
 
@@ -745,12 +747,26 @@ static void XEShowSettingsFrom(UIViewController *from) {
 }
 
 #pragma mark - 「我的」页净化
-// 迅雷「我的」页是 Swift 混编页面，section 由服务端配置驱动，静态拿不到结构，
-// 也就没法像广告那样 hook 数据源。这里走视图级：板块视图挂上来的时候按类名
-// 认人，命中就整块隐掉（UIStackView 里 hidden 会自动塌陷，不留空档）。
-// 只认「推广类」组件，功能入口（云盘 / 离线 / 分享 / 设置）一律不动。
+// 「我的」页的真实结构（25.2.90 逆向确认）：
+//   UITabBarController
+//     └─ AccountContainerViewController          ← tab 上挂的容器，类名不含 Mine
+//          └─ _LayoutPersonalCenterViewController ← 真正的页面，纯 Swift 类
+//               ├─ 竖向堆叠的卡片（CardBaseView / ActivityCardView / VipInfoItemView …）
+//               └─ 少量 UICollectionView（BannerServiceCollectionCell）
+//
+// v2.1 完全没生效的两个原因，这里都修掉：
+//   1. 作用域判定按 VC 类名找 Mine / PersonalCenter，可顶层是 AccountContainer，
+//      第一个 VC 不匹配就 return NO —— 等于把所有隐藏全部关掉（真 bug）；
+//   2. 只设 hidden 不改布局 —— 卡片自己带固定高度约束，hidden 只是不绘制，
+//      位置照旧占着，看起来就是「没隐藏」。
+//
+// v2.2 的策略：类名命中就动手，命中后把「整块卡片」真正从布局里塌掉
+// （cell 除外，cell 从复用池摘掉会崩）。作用域只用于避免误伤其它页面。
 
 static long gXEMineHidden = 0;
+static BOOL gXEMineActive = NO;         // 探针维护：当前顶层页面是不是「我的」
+static NSString *gXEMineDump = nil;     // 视图树快照，诊断里带上，方便定位没命中的板块
+static NSString *gXEMinePageClass = nil;// 最近一次识别到的「我的」页顶层类名
 
 typedef NS_ENUM(NSInteger, XECleanKind) {
     XECleanNone = 0,
@@ -759,20 +775,18 @@ typedef NS_ENUM(NSInteger, XECleanKind) {
     XECleanPromo,
 };
 
-// addSubview 是全 App 最高频的调用之一，这里不能做任何 OC 对象操作：
-// 直接拿 class_getName 的 const char * 做 strstr，再把结论按 Class 指针缓存。
+// addSubview 是全 App 最高频的调用之一，这里不能做 OC 对象操作：
+// 直接拿 class_getName 的 const char * 做 strstr，结论按 Class 指针缓存。
 static const char *kXEVipKeys[] = {
     "VipInfoItemView", "VipInfoPopView", "KuaiNiaoVipTryEntranceBar",
-    "PurchaseUpgradePriceBanner", "VipPrivilegeRow", "VipCard",
-    "PersonalCenterVipCard", "SuperVipEntry",
+    "SuperVipEntry", "VipPrivilegeCardCollectionViewCell",
 };
 static const char *kXEGameKeys[] = {
-    "GameEntryView", "GameCenterHeadView", "GameCenterEntry",
-    "GameCenterCell", "GameRecommend",
+    "GameEntryView", "GameCenterHeadView", "GameCenterEntry", "GameCenterCell",
 };
 static const char *kXEPromoKeys[] = {
-    "RecommendItemView", "BannerService", "ActivityCenter",
-    "PersonalCenterRecommend", "MineRecommend", "OperationCard",
+    "RecommendItemView", "BannerServiceCollectionCell", "ActivityCardView",
+    "OperationCard", "MineRecommend", "PersonalCenterRecommend",
     "PersonalCenterActivity",
 };
 
@@ -788,7 +802,7 @@ typedef struct {
     XECleanKind kind;
 } XECleanCacheEntry;
 
-static XECleanCacheEntry gXECleanCache[96];
+static XECleanCacheEntry gXECleanCache[128];
 static int gXECleanCacheCount = 0;
 
 static XECleanKind XECleanKindForClass(Class cls) {
@@ -799,6 +813,7 @@ static XECleanKind XECleanKindForClass(Class cls) {
 
     const char *name = class_getName(cls);
     XECleanKind kind = XECleanNone;
+    // 自己的类一律不碰（XE 前缀）
     if (name && name[0] && !(name[0] == 'X' && name[1] == 'E')) {
         if (XENameContains(name, kXEVipKeys, sizeof(kXEVipKeys) / sizeof(char *))) {
             kind = XECleanVip;
@@ -809,7 +824,7 @@ static XECleanKind XECleanKindForClass(Class cls) {
         }
     }
 
-    if (gXECleanCacheCount < 96) {
+    if (gXECleanCacheCount < 128) {
         gXECleanCache[gXECleanCacheCount].cls = cls;
         gXECleanCache[gXECleanCacheCount].kind = kind;
         gXECleanCacheCount++;
@@ -822,76 +837,196 @@ static BOOL XEMineCleanWanted(void) {
     return XE_HideMineVip() || XE_HideMineGame() || XE_HideMinePromo();
 }
 
-// 只对「我的」页生效：购买页 / 会员页里同名的 VIP 组件必须留着，
-// 否则会把功能页也一起弄坏。顺着 superview → nextResponder 找到所属 VC，
-// 类名带 PersonalCenter / Mine 才算。
-// 这个链只在类名命中时才走（命中很少），平时零成本。
-static BOOL XEViewOnMinePage(UIView *v) {
-    for (UIView *p = v; p; p = p.superview) {
-        id responder = [p nextResponder];
-        if (![responder isKindOfClass:[UIViewController class]]) continue;
-        UIViewController *vc = (UIViewController *)responder;
-        if ([vc.title isEqualToString:@"我的"]) return YES;
-        const char *name = class_getName([responder class]);
-        if (!name) return NO;
-        return (strstr(name, "PersonalCenter") || strstr(name, "Mine")) ? YES : NO;
+static BOOL XECleanKindEnabled(XECleanKind kind) {
+    switch (kind) {
+        case XECleanVip:   return XE_HideMineVip();
+        case XECleanGame:  return XE_HideMineGame();
+        case XECleanPromo: return XE_HideMinePromo();
+        case XECleanNone:  break;
     }
     return NO;
 }
 
-static BOOL XEShouldHideView(UIView *v) {
-    if (!v) return NO;
+static BOOL XEIsCellView(UIView *v) {
+    static Class ccCell = Nil, tvCell = Nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        ccCell = NSClassFromString(@"UICollectionViewCell");
+        tvCell = NSClassFromString(@"UITableViewCell");
+    });
+    if (ccCell && [v isKindOfClass:ccCell]) return YES;
+    if (tvCell && [v isKindOfClass:tvCell]) return YES;
+    return NO;
+}
 
-    // 先看类名（走指针缓存，几乎零成本），不是推广组件就立刻返回，
-    // 不读偏好，也不碰任何 OC 对象。
-    XECleanKind kind = XECleanKindForClass(object_getClass(v));
-    if (kind == XECleanNone) return NO;
-
-    BOOL want = NO;
-    switch (kind) {
-        case XECleanVip:   want = XE_HideMineVip();   break;
-        case XECleanGame:  want = XE_HideMineGame();  break;
-        case XECleanPromo: want = XE_HideMinePromo(); break;
-        case XECleanNone:  return NO;
+// 命中一个板块视图后，往上找「这一块」的容器：
+// 比如 BannerServiceCollectionCell 只是 banner 卡里的一条，隐藏一条会留空，
+// 隐藏它所在的那张卡才是用户想要的效果。到页面级容器（很高）就停手。
+static UIView *XEContainerOf(UIView *v) {
+    UIView *p = v.superview;
+    for (int i = 0; i < 3 && p; i++) {
+        if (p.bounds.size.height > 500) break;          // 页面级容器，不要整页干掉
+        if ([p isKindOfClass:[UICollectionView class]] ||
+            [p isKindOfClass:[UITableView class]] ||
+            XEIsCellView(p)) {
+            p = p.superview;
+            continue;
+        }
+        return p;
     }
-    if (!want) return NO;
-    return XEViewOnMinePage(v);
+    return v;
 }
 
 static void XEHideMineBlock(UIView *v) {
     if (!v || v.hidden) return;
+
+    if (XEIsCellView(v)) {
+        UIView *box = XEContainerOf(v);
+        if (box && box != v && !box.hidden) {
+            v = box;   // 卡片容器整块拿下，不然只隐藏一条会留白
+        }
+    }
+
     v.hidden = YES;
     v.alpha = 0;
     v.userInteractionEnabled = NO;
     gXEMineHidden++;
-    XELog(@"hidden mine block: %@", NSStringFromClass([v class]));
+
+    // cell 只能靠 hidden：从复用池摘掉会让 collection view 崩
+    if (XEIsCellView(v)) {
+        XELog(@"hidden mine cell: %@", NSStringFromClass([v class]));
+        return;
+    }
+
+    // 卡片自己带固定高度约束的话，先把它压到 0
+    for (NSLayoutConstraint *c in v.constraints) {
+        if (c.firstItem != v && c.secondItem != v) continue;
+        if (c.firstAttribute == NSLayoutAttributeHeight) c.constant = 0;
+        if (c.firstAttribute == NSLayoutAttributeWidth) c.constant = 0;
+    }
+
+    UIView *parent = v.superview;
+    if (!parent) return;
+
+    if ([parent isKindOfClass:[UIStackView class]]) {
+        [parent setNeedsLayout];   // stack 自己会塌陷，不用摘
+        XELog(@"collapsed mine block in stack: %@", NSStringFromClass([v class]));
+        return;
+    }
+
+    // 普通容器里 hidden 只留一块空白，摘掉才真的不占位
+    [v removeFromSuperview];
+    XELog(@"removed mine block: %@", NSStringFromClass([v class]));
+}
+
+// trusted=YES：主动扫描（已经在「我的」页上），不再看页面标志
+static BOOL XEShouldHideView(UIView *v, BOOL trusted) {
+    if (!v) return NO;
+
+    XECleanKind kind = XECleanKindForClass(object_getClass(v));
+    if (kind == XECleanNone) return NO;
+    if (!XECleanKindEnabled(kind)) return NO;
+    if (!trusted && !gXEMineActive) return NO;
+
+    // 走到这里说明类名已经够特异（VipInfoItemView / GameEntryView / ActivityCardView
+    // 这些只在「我的」页出现），不再做 VC 判定 —— v2.1 就是因为多加了这层判定，
+    // 顶层是 AccountContainerViewController 直接判死，一个都没隐藏。
+    return YES;
+}
+
+static void XESweepMineRecursive(UIView *v, int depth, int *budget) {
+    if (!v || depth > 14 || *budget <= 0) return;
+    (*budget)--;
+
+    // 先扫子视图再处理自己：自己一旦被摘掉，子的遍历就断了
+    NSArray<UIView *> *subs = [v.subviews copy];
+    for (UIView *s in subs) XESweepMineRecursive(s, depth + 1, budget);
+
+    if (XEShouldHideView(v, YES)) XEHideMineBlock(v);
 }
 
 static void XESweepMineView(UIView *v, int depth) {
-    if (!v || depth > 16) return;
-    if (XEShouldHideView(v)) XEHideMineBlock(v);
-    for (UIView *sub in v.subviews) XESweepMineView(sub, depth + 1);
+    int budget = 800;
+    XESweepMineRecursive(v, depth, &budget);
 }
 
 // 面板里改了开关：清判定缓存并立刻重扫一遍当前页面，不用杀进程
+// （已经摘掉的视图不会自己回来，关开关后重进「我的」页即可恢复）
 static void XERefreshMineClean(void) {
     gXECleanCacheCount = 0;
+    gXEMineDump = nil;
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *top = XETopViewController();
         if (top) XESweepMineView(top.view, 0);
     });
 }
 
+static void xe_addSubview(id self, SEL _cmd, UIView *v);
+static void xe_insertSubview(id self, SEL _cmd, UIView *v, NSInteger index);
+
 static void (*xe_orig_addSubview)(id, SEL, UIView *);
 static void xe_addSubview(id self, SEL _cmd, UIView *v) {
     xe_orig_addSubview(self, _cmd, v);
-    if (XEShouldHideView(v)) XEHideMineBlock(v);
+    if (!XEMineCleanWanted()) return;
+    if (XEShouldHideView(v, NO)) {
+        XEHideMineBlock(v);
+        return;
+    }
+    // 卡片常见做法：先在自己的容器里组装好，再把整块容器 addSubview 上屏。
+    // 这时容器本身不是命中类名，得往下挖一层，但只在「我的」页上做，控制开销。
+    if (gXEMineActive && v.subviews.count > 0 && v.bounds.size.height > 40) {
+        int budget = 60;
+        XESweepMineRecursive(v, 0, &budget);
+    }
 }
 
 static void (*xe_orig_insertSubview)(id, SEL, UIView *, NSInteger);
 static void xe_insertSubview(id self, SEL _cmd, UIView *v, NSInteger index) {
     xe_orig_insertSubview(self, _cmd, v, index);
-    if (XEShouldHideView(v)) XEHideMineBlock(v);
+    if (!XEMineCleanWanted()) return;
+    if (XEShouldHideView(v, NO)) {
+        XEHideMineBlock(v);
+        return;
+    }
+    if (gXEMineActive && v.subviews.count > 0 && v.bounds.size.height > 40) {
+        int budget = 60;
+        XESweepMineRecursive(v, 0, &budget);
+    }
+}
+
+// collection view 里的 cell 是 layout 摆出来的，addSubview 拦不到内部 cell，
+// 每次布局完补一遍可见 cell。
+static void (*xe_orig_cvLayoutSubviews)(id, SEL);
+static void xe_cvLayoutSubviews(id self, SEL _cmd) {
+    xe_orig_cvLayoutSubviews(self, _cmd);
+    if (!gXEMineActive || !XEMineCleanWanted()) return;
+    for (UICollectionViewCell *c in [(UICollectionView *)self visibleCells]) {
+        if (XEShouldHideView(c, YES)) XEHideMineBlock(c);
+    }
+}
+
+// 下面两个在「我的」页识别段定义，这里先声明
+static BOOL XEVCLooksLikeMine(UIViewController *vc, int depth);
+static void XECaptureMineDump(UIViewController *top);
+static void XESweepMineView(UIView *v, int depth);
+
+// 切到「我的」页时卡片是在 viewDidAppear 前后才铺完的，只靠 0.5s 探针会先闪一下。
+// 这里在页面出现时补打一次，延迟 0.15s 等布局落定（layout 没跑完时拿到的尺寸不可信，
+// XEContainerOf 的阈值会判错）。
+static void (*xe_orig_viewDidAppear)(id, SEL, BOOL);
+static void xe_viewDidAppear(id self, SEL _cmd, BOOL animated) {
+    xe_orig_viewDidAppear(self, _cmd, animated);
+    if (!XEMineCleanWanted()) return;
+    if (!XEVCLooksLikeMine(self, 0)) return;
+
+    UIViewController *vc = (UIViewController *)self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        gXEMineActive = YES;
+        gXEMinePageClass = NSStringFromClass([vc class]);
+        XESweepMineView(vc.view, 0);
+        XECaptureMineDump(vc);
+    });
 }
 
 static void XEInstallMineCleaner(void) {
@@ -901,6 +1036,54 @@ static void XEInstallMineCleaner(void) {
     XEInstallOn([UIView class], "addSubview:", (IMP)xe_addSubview, (IMP *)&xe_orig_addSubview);
     XEInstallOn([UIView class], "insertSubview:atIndex:", (IMP)xe_insertSubview,
                 (IMP *)&xe_orig_insertSubview);
+    XEInstallOn([UICollectionView class], "layoutSubviews",
+                (IMP)xe_cvLayoutSubviews, (IMP *)&xe_orig_cvLayoutSubviews);
+    XEInstallOn([UIViewController class], "viewDidAppear:",
+                (IMP)xe_viewDidAppear, (IMP *)&xe_orig_viewDidAppear);
+}
+
+#pragma mark 「我的」页识别与视图树快照
+
+// 顶层是 AccountContainerViewController，真正的个人中心是它的 child，
+// 所以两层都要看，且不能像 v2.1 那样「第一个不匹配就放弃」。
+static BOOL XEVCLooksLikeMine(UIViewController *vc, int depth) {
+    if (!vc || depth > 3) return NO;
+
+    const char *name = class_getName([vc class]);
+    if (name && (strstr(name, "PersonalCenter") || strstr(name, "AccountContainer") ||
+                 strstr(name, "Mine"))) {
+        return YES;
+    }
+    if ([vc.title isEqualToString:@"我的"] || [vc.title isEqualToString:@"個人中心"] ||
+        [vc.title isEqualToString:@"个人中心"]) {
+        return YES;
+    }
+    for (UIViewController *child in vc.childViewControllers) {
+        if (XEVCLooksLikeMine(child, depth + 1)) return YES;
+    }
+    return NO;
+}
+
+static void XEDumpTree(UIView *v, int depth, NSMutableString *out, int *count) {
+    if (!v || depth > 11 || *count >= 90) return;
+    NSString *name = NSStringFromClass([v class]);
+    if (name.length > 76) name = [name substringFromIndex:name.length - 76];
+    NSMutableString *pad = [NSMutableString string];
+    for (int i = 0; i < depth; i++) [pad appendString:@"· "];
+    [out appendFormat:@"%@%@ %.0fx%.0f\n", pad, name,
+                      v.bounds.size.width, v.bounds.size.height];
+    (*count)++;
+    for (UIView *s in v.subviews) XEDumpTree(s, depth + 1, out, count);
+}
+
+static void XECaptureMineDump(UIViewController *top) {
+    if (gXEMineDump.length > 160) return;   // 太少说明页面还没铺完，下次重抓
+    if (!top.isViewLoaded) return;
+    NSMutableString *out = [NSMutableString string];
+    int count = 0;
+    XEDumpTree(top.view, 0, out, &count);
+    gXEMineDump = out.length ? out : @"(空)";
+    XELog(@"mine tree captured: %d nodes", count);
 }
 
 #pragma mark - 入口一：设置页最后一行（视图注入，不碰数据源）
@@ -1050,8 +1233,6 @@ static void XEAttachEntryTo(UIViewController *vc) {
 
 #pragma mark 探测
 
-static int gXEMineTicks = 0;
-
 static void XEProbeTick(void) {
     UIViewController *top = XETopViewController();
     if (!top) return;
@@ -1068,12 +1249,16 @@ static void XEProbeTick(void) {
     }
     if (isSettings) XEAttachEntryTo(top);
 
-    // 「我的」页：新进来的板块由 addSubview hook 拦，这里补一次全量扫（异步加载的）
-    BOOL isMine = [cls rangeOfString:@"PersonalCenter" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                  [cls rangeOfString:@"Mine" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-                  [top.title isEqualToString:@"我的"];
-    if (XEMineCleanWanted() && isMine) {
-        if (++gXEMineTicks % 4 == 1) XESweepMineView(top.view, 0);
+    // 「我的」页：顶层挂的是 AccountContainerViewController，真正的个人中心在 child 里，
+    // 所以判定交给 XEVCLooksLikeMine（会往下钻，且不会因为第一个 VC 不匹配就放弃）。
+    BOOL isMine = XEVCLooksLikeMine(top, 0);
+    gXEMineActive = isMine;
+
+    if (isMine) gXEMinePageClass = cls;
+    if (isMine && XEMineCleanWanted()) {
+        // 每 0.5s 补一遍：服务端配置回来的板块是异步加的，只靠 addSubview 会漏
+        XESweepMineView(top.view, 0);
+        XECaptureMineDump(top);
     }
 }
 
@@ -1081,7 +1266,7 @@ static void XEInstallSettingsEntry(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         dispatch_async(dispatch_get_main_queue(), ^{
-            NSTimer *timer = [NSTimer timerWithTimeInterval:0.5
+            NSTimer *timer = [NSTimer timerWithTimeInterval:0.3
                                                     repeats:YES
                                                       block:^(NSTimer *t) { XEProbeTick(); }];
             timer.tolerance = 0.2;
@@ -1335,21 +1520,39 @@ static NSString *XEDiagValue(NSString *kind) {
     if ([kind isEqualToString:@"mine"]) {
         return [NSString stringWithFormat:@"%ld 块", gXEMineHidden];
     }
+    if ([kind isEqualToString:@"minepage"]) {
+        return gXEMinePageClass ?: @"还没进过「我的」页";
+    }
+    if ([kind isEqualToString:@"minetree"]) {
+        if (gXEMineDump.length == 0) return @"还没抓取";
+        NSUInteger lines = gXEMineDump.length ? [[gXEMineDump componentsSeparatedByString:@"\n"] count] - 1 : 0;
+        return [NSString stringWithFormat:@"%lu 个节点", (unsigned long)lines];
+    }
     return @"-";
 }
 
 static NSString *XEDiagReport(void) {
-    return [NSString stringWithFormat:
+    NSString *head = [NSString stringWithFormat:
         @"XunleiEnhance v%@\nbundle : %@\nhook : %ld/%ld\n"
-         @"设置页 : %@（注入 %ld 次）\n我的页拦截 : %ld 块\n悬浮球 : %@\nprefs : %@",
+         @"设置页 : %@（注入 %ld 次）\n"
+         @"我的页 : %@ / 拦截 %ld 块 / 悬浮球 %@\n"
+         @"开关 : 会员%@ 游戏%@ 推荐%@ 开屏秒进%@\nprefs : %@",
         XE_VERSION,
         [[NSBundle mainBundle] bundleIdentifier],
         (long)gXEHookOK, (long)gXEHookTotal,
         gXEEntryPage ?: @"未命中",
         gXESettingsHits,
+        gXEMinePageClass ?: @"未进入",
         gXEMineHidden,
         XEFloatVisible() ? @"在屏" : @"未装",
+        XE_HideMineVip() ? @"开" : @"关",
+        XE_HideMineGame() ? @"开" : @"关",
+        XE_HideMinePromo() ? @"开" : @"关",
+        XE_InstantSplash() ? @"开" : @"关",
         gXEPrefs];
+
+    if (gXEMineDump.length == 0) return head;
+    return [NSString stringWithFormat:@"%@\n\n--- 我的页视图树 ---\n%@", head, gXEMineDump];
 }
 
 #pragma mark - 安装

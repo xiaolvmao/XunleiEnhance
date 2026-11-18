@@ -28,23 +28,23 @@
 | 关闭个性化广告推荐 | 开 | 等价于 App 内「广告设置 → 个性化推荐」关闭 | `XCAdConfigManager` |
 | 关闭摇一摇 / 扭一扭跳转 | 开 | 误触重灾区，配置层直接关掉 | `XCAdConfigModel` |
 | 限制广告自动跳转 | 开 | 禁止广告点击后自动唤起 App Store / 第三方 App | `XCAdConfigManager` |
-| 隐藏会员 / 充值推广 | 开 | 「我的」页会员卡、充值 banner、试用条整块隐掉 | 视图层（`Vip*` / `Purchase*`），仅「我的」页 |
-| 隐藏游戏中心 | 开 | 「我的」页游戏中心区块隐掉 | 视图层（`Game*`），仅「我的」页 |
-| 隐藏运营推荐位 | 开 | 运营 banner、推荐位、活动卡隐掉 | 视图层（`Banner*` / `Recommend*` / `Activity*`），仅「我的」页 |
+| 隐藏会员 / 充值推广 | 开 | 会员卡、充值 banner、快鸟试用条整块从布局里塌掉 | 视图层（`VipInfoItemView` / `VipInfoPopView` / `KuaiNiaoVipTryEntranceBar`） |
+| 隐藏游戏中心 | 开 | 游戏中心整块塌掉 | 视图层（`GameEntryView` / `GameCenterHeadView`） |
+| 隐藏运营推荐位 | 开 | banner、推荐位、活动卡整块塌掉 | 视图层（`RecommendItemView` / `BannerServiceCollectionCell` / `ActivityCardView`） |
 | 显示悬浮入口 | 开 | 右侧半透明齿轮，可拖动；关掉后只剩设置页那一行 | — |
 | 升级后提示已生效 | 开 | 每个版本首次启动弹一次，兼作注入自证 | — |
 | 输出调试日志 | 关 | `XunleiEnhance` 前缀日志，便于自查 | — |
 
-改开关即时热加载（Darwin 通知）；「我的」页净化改动后重进该页完全生效；
+改开关即时热加载（Darwin 通知）；「我的」页净化是**在布局里摘掉**，关掉后需重进该页才恢复；
 开屏秒进在下次启动迅雷时读取。
 
 ## 安装
 
 ### A. TrollStore + TrollFools（推荐）
 
-1. 下载 `com.xiaolvmao.xunleienhance_2.1.0_iphoneos-arm.deb`（Releases 或 Actions 工件）
+1. 下载 `com.xiaolvmao.xunleienhance_2.2.0_iphoneos-arm.deb`（Releases 或 Actions 工件）
 2. **TrollFools** → `+` → 选这个 deb → 选「迅雷」→ 注入 → 重启迅雷
-3. 打开迅雷，**核对入口**：应在 2 秒内弹出「迅雷增强 v2.1.0 已生效」；
+3. 打开迅雷，**核对入口**：应在 2 秒内弹出「迅雷增强 v2.2.0 已生效」；
    同时屏幕右侧出现半透明齿轮（可拖动，位置会记住）
 
 如果没有弹窗、也没有齿轮，说明 **dylib 没被加载**（注入失败），与插件逻辑无关 ——
@@ -99,7 +99,7 @@ make package FINALPACKAGE=1
 迅雷增强（开关面板）
 ├─ 通用              启用迅雷增强
 ├─ 广告拦截          去除开屏 / 开屏秒进 / 信息流 / 预加载 / 卡片
-├─ 「我的」页净化    会员充值 / 游戏中心 / 运营推荐位
+├─ 「我的」页净化    会员充值 / 游戏中心 / 运营推荐位（真正从布局移除）
 ├─ 深度屏蔽（激进）  屏蔽全部广告位
 ├─ 体验优化          关个性化 / 关摇一摇 / 限制自动跳转
 ├─ 入口              显示悬浮入口 / 升级后提示
@@ -126,10 +126,40 @@ v2.1 换成视图级注入，跟数据源完全无关：
 因为位置是「列表最后一行」本身，不需要猜段数、不需要类自己实现数据源方法，
 也不会因为迅雷改设置页实现而失效。
 
+### ② 「我的」页是怎么净化的
+
+「我的」页是 Swift 页面，结构是：
+
+```
+AccountContainerViewController          tab 上挂的容器，类名里没有 Mine
+  └─ _LayoutPersonalCenterViewController 真正的页面，纯 Swift 类
+       ├─ 竖向堆叠的卡片（CardBaseView / ActivityCardView / VipInfoItemView …）
+       └─ 少量 UICollectionView（BannerServiceCollectionCell）
+```
+
+v2.1 有两处硬伤，v2.2 都修掉了：
+
+1. **作用域判定写错**：原来按 VC 类名找 `Mine` / `PersonalCenter`，可顶层是
+   `AccountContainerViewController`，第一个 VC 不匹配就 `return NO` —— 等于把所有隐藏
+   全关掉。现在判定会往下钻一层看 child VC，且不再「第一个不匹配就放弃」。
+2. **只设 `hidden` 不改布局**：卡片自带固定高度约束，`hidden` 只是不绘制，位置照旧
+   占着，看起来就是「没隐藏」。现在命中后会把高度约束压到 0，非 `UIStackView` 容器
+   里直接 `removeFromSuperview` —— 真正从布局里塌掉，不留空档。
+
+触发点有四个，任何一个先到就先处理：
+
+- `viewDidAppear`（延迟 0.15s 等布局落定）
+- 0.3s 探针（服务端配置回来的板块是异步加的）
+- `UIView addSubview:` / `insertSubview:atIndex:`（卡片容器上屏时往下挖一层）
+- `UICollectionView layoutSubviews`（cell 是 layout 摆出来的，拦不到内部）
+
+cell 类不做移除（从复用池摘掉会让 collection view 崩），改为把它所在的整张卡拿掉。
+
 ### 诊断
 
 面板最后一组实时显示：版本、hook 装上几项、**最近一次注入的设置页类名与注入次数**、
-**「我的」页拦下了几块**、悬浮入口是否在屏。整段可一键复制，排查时直接发出来即可判断是哪一环断了。
+**「我的」页识别到哪个 VC、拦下了几块、视图树快照**、悬浮入口是否在屏。
+「我的页结构」那一项显示抓到的节点数，`复制诊断信息` 会把整棵树一起复制出来。整段可一键复制，排查时直接发出来即可判断是哪一环断了。
 
 其余文件：
 
