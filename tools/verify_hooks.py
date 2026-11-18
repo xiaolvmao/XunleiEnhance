@@ -44,7 +44,8 @@ def main():
         return 1
 
     ok = miss = 0
-    print("目标: %s %s (%s)\n" % (meta["app"], meta["version"], meta["binary"]))
+    print("目标: %s %s (%s)\n" % (meta.get("app", "迅雷"), meta.get("version", "-"),
+                                 meta.get("binary", "TDMVideo")))
     seen = set()
     for cls, sel in hooks:
         if (cls, sel) in seen:

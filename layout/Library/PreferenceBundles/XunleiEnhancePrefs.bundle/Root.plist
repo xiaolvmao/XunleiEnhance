@@ -4,6 +4,8 @@
 <dict>
 	<key>title</key>
 	<string>迅雷增强</string>
+	<key>defaults</key>
+	<string>com.xunlei.mvideo.xunleienhance</string>
 	<key>items</key>
 	<array>
 
