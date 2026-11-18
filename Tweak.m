@@ -884,19 +884,22 @@ static void XEInstallSettingsEntry(void) {
 
 static UIButton *gXEFloatBtn = nil;
 
+// 不用 UIApplication.keyWindow（iOS 13 起废弃，-Werror 会直接编译失败），
+// 改为遍历 connectedScenes：优先 isKeyWindow，退而取第一个可见窗口。
 static UIWindow *XEKeyWindow(void) {
     if (@available(iOS 13.0, *)) {
         UIApplication *app = [UIApplication sharedApplication];
+        UIWindow *fallback = nil;
         for (UIScene *scene in [app connectedScenes]) {
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-            if (scene.activationState != UISceneActivationStateForegroundActive) continue;
-            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                if (w.isKeyWindow) return w;
+            for (UIWindow *w in [((UIWindowScene *)scene) windows]) {
+                if ([w isKeyWindow]) return w;
+                if (!fallback && ![w isHidden]) fallback = w;
             }
         }
+        return fallback;
     }
-    UIWindow *legacy = [[UIApplication sharedApplication] keyWindow];
-    return legacy;
+    return nil;
 }
 
 static UIViewController *XETopViewController(void) {
