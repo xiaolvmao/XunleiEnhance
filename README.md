@@ -42,9 +42,9 @@
 
 ### A. TrollStore + TrollFools（推荐）
 
-1. 下载 `com.xiaolvmao.xunleienhance_2.2.0_iphoneos-arm.deb`（Releases 或 Actions 工件）
+1. 下载 `com.xiaolvmao.xunleienhance_2.2.1_iphoneos-arm.deb`（Releases 或 Actions 工件）
 2. **TrollFools** → `+` → 选这个 deb → 选「迅雷」→ 注入 → 重启迅雷
-3. 打开迅雷，**核对入口**：应在 2 秒内弹出「迅雷增强 v2.2.0 已生效」；
+3. 打开迅雷，**核对入口**：应在 2 秒内弹出「迅雷增强 v2.2.1 已生效」；
    同时屏幕右侧出现半透明齿轮（可拖动，位置会记住）
 
 如果没有弹窗、也没有齿轮，说明 **dylib 没被加载**（注入失败），与插件逻辑无关 ——
@@ -143,17 +143,27 @@ v2.1 有两处硬伤，v2.2 都修掉了：
    `AccountContainerViewController`，第一个 VC 不匹配就 `return NO` —— 等于把所有隐藏
    全关掉。现在判定会往下钻一层看 child VC，且不再「第一个不匹配就放弃」。
 2. **只设 `hidden` 不改布局**：卡片自带固定高度约束，`hidden` 只是不绘制，位置照旧
-   占着，看起来就是「没隐藏」。现在命中后会把高度约束压到 0，非 `UIStackView` 容器
-   里直接 `removeFromSuperview` —— 真正从布局里塌掉，不留空档。
+   占着，看起来就是「没隐藏」。现在命中后会把自身高度约束压到 0 并补一条 0 高度约束，
+   布局自己塌下去。
 
-触发点有四个，任何一个先到就先处理：
+> **v2.2.0 曾经在这里用 `removeFromSuperview`，会闪退**：迅雷的 Swift 代码自己持有
+> 这些卡片视图，我们把它从视图树上摘走后，它遍历时强制解包就
+> `_assertionFailure`（崩溃栈是 `Sequence.forEach` → Swift 断言）。
+> 视图树属于 App，不能摘 —— v2.2.1 起只改尺寸，不动树。
+
+所有改动都**排队到下一轮 runloop** 执行，不在 `addSubview` / `layoutSubviews` 的
+调用栈里改视图（那会和 App 自己的布局循环打架）。触发点有四个：
 
 - `viewDidAppear`（延迟 0.15s 等布局落定）
 - 0.3s 探针（服务端配置回来的板块是异步加的）
 - `UIView addSubview:` / `insertSubview:atIndex:`（卡片容器上屏时往下挖一层）
 - `UICollectionView layoutSubviews`（cell 是 layout 摆出来的，拦不到内部）
 
-cell 类不做移除（从复用池摘掉会让 collection view 崩），改为把它所在的整张卡拿掉。
+cell 类不单独处理尺寸，改为把它所在的那张卡一起压掉。
+
+另外还有一个**启动熔断**：如果上一次启动没活过 20 秒（说明崩在启动阶段），这次启动会
+直接把「我的」页净化停掉，保证 App 能进去 —— 诊断里会显示「已自动停用」。正常使用
+（活过 20 秒）不会触发，下次启动自动恢复。
 
 ### 诊断
 

@@ -20,7 +20,7 @@
 
 #define XE_PREF_DOMAIN_STR "com.xunlei.mvideo.xunleienhance"
 #define XE_NOTIFY_STR "com.xiaolvmao.xunleienhance/reload"
-#define XE_VERSION @"2.2.0"
+#define XE_VERSION @"2.2.1"
 
 static NSDictionary *gXEPrefs = nil;
 
@@ -746,6 +746,37 @@ static void XEShowSettingsFrom(UIViewController *from) {
     [from presentViewController:wrapper animated:YES completion:nil];
 }
 
+#pragma mark - 启动熔断
+// 净化要动 App 的视图，万一某版迅雷改了结构导致启动阶段闪退，用户会卡在
+// 「一进就崩、又没机会去关开关」的死循环里。这里用「上次启动有没有活过 20 秒」
+// 判断上次是不是崩在启动阶段：是就在这次启动直接把净化停掉，保证 App 能进去。
+// 活过 20 秒会打上存活标记，所以正常使用不会误判。
+
+static BOOL gXEMineDisabledByCrash = NO;   // 上次启动阶段崩过 → 本次自动停用净化
+
+static void XECrashGuardBegin(void) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    BOOL lastAlive = [ud boolForKey:@"xeLaunchAlive"];
+    NSTimeInterval lastAt = [ud doubleForKey:@"xeLaunchAt"];
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+
+    if (lastAt > 0 && !lastAlive) {
+        gXEMineDisabledByCrash = YES;
+        XELog(@"last launch died early -> mine clean disabled this run");
+    }
+
+    [ud setBool:NO forKey:@"xeLaunchAlive"];
+    [ud setDouble:now forKey:@"xeLaunchAt"];
+    [ud synchronize];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+        [d setBool:YES forKey:@"xeLaunchAlive"];
+        [d synchronize];
+    });
+}
+
 #pragma mark - 「我的」页净化
 // 「我的」页的真实结构（25.2.90 逆向确认）：
 //   UITabBarController
@@ -834,6 +865,7 @@ static XECleanKind XECleanKindForClass(Class cls) {
 
 // 三个开关全关时直接短路，addSubview 上几乎没有额外开销
 static BOOL XEMineCleanWanted(void) {
+    if (gXEMineDisabledByCrash) return NO;
     return XE_HideMineVip() || XE_HideMineGame() || XE_HideMinePromo();
 }
 
@@ -868,6 +900,7 @@ static UIView *XEContainerOf(UIView *v) {
         if (p.bounds.size.height > 500) break;          // 页面级容器，不要整页干掉
         if ([p isKindOfClass:[UICollectionView class]] ||
             [p isKindOfClass:[UITableView class]] ||
+            [p isKindOfClass:[UIScrollView class]] ||
             XEIsCellView(p)) {
             p = p.superview;
             continue;
@@ -892,31 +925,37 @@ static void XEHideMineBlock(UIView *v) {
     v.userInteractionEnabled = NO;
     gXEMineHidden++;
 
-    // cell 只能靠 hidden：从复用池摘掉会让 collection view 崩
-    if (XEIsCellView(v)) {
-        XELog(@"hidden mine cell: %@", NSStringFromClass([v class]));
-        return;
-    }
+    // v2.2 在这里做了 removeFromSuperview，结果闪退：
+    // 迅雷的 Swift 代码自己持有这些卡片视图，遍历时强制解包就直接
+    // _assertionFailure（崩溃栈里就是 Sequence.forEach → 断言）。
+    // 视图树属于 App，不能摘；只把尺寸压到 0，让布局自己塌下去。
+    if (XEIsCellView(v)) return;
 
-    // 卡片自己带固定高度约束的话，先把它压到 0
+    static char kXECollapsedKey;
+    if (objc_getAssociatedObject(v, &kXECollapsedKey)) return;
+    objc_setAssociatedObject(v, &kXECollapsedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
     for (NSLayoutConstraint *c in v.constraints) {
         if (c.firstItem != v && c.secondItem != v) continue;
         if (c.firstAttribute == NSLayoutAttributeHeight) c.constant = 0;
-        if (c.firstAttribute == NSLayoutAttributeWidth) c.constant = 0;
     }
 
-    UIView *parent = v.superview;
-    if (!parent) return;
-
-    if ([parent isKindOfClass:[UIStackView class]]) {
-        [parent setNeedsLayout];   // stack 自己会塌陷，不用摘
-        XELog(@"collapsed mine block in stack: %@", NSStringFromClass([v class]));
-        return;
+    // Auto Layout 布局的卡片：补一条 0 高度约束，真正不占位。
+    // frame 布局的视图加约束无效，那就只剩 hidden（宁可留白，也不能动 App 的树）。
+    if (!v.translatesAutoresizingMaskIntoConstraints) {
+        NSLayoutConstraint *zero =
+            [NSLayoutConstraint constraintWithItem:v
+                                        attribute:NSLayoutAttributeHeight
+                                        relatedBy:NSLayoutRelationEqual
+                                           toItem:nil
+                                        attribute:NSLayoutAttributeNotAnAttribute
+                                       multiplier:1
+                                         constant:0];
+        zero.priority = 998;
+        [v addConstraint:zero];
     }
 
-    // 普通容器里 hidden 只留一块空白，摘掉才真的不占位
-    [v removeFromSuperview];
-    XELog(@"removed mine block: %@", NSStringFromClass([v class]));
+    XELog(@"collapsed mine block: %@", NSStringFromClass([v class]));
 }
 
 // trusted=YES：主动扫描（已经在「我的」页上），不再看页面标志
@@ -950,15 +989,48 @@ static void XESweepMineView(UIView *v, int depth) {
     XESweepMineRecursive(v, depth, &budget);
 }
 
+// 这两个在「我的」页识别段实现，这里先用
+static BOOL XEVCLooksLikeMine(UIViewController *vc, int depth);
+static void XECaptureMineDump(UIViewController *top);
+
+static BOOL gXESweepQueued = NO;
+static NSTimeInterval gXELastSweep = 0;
+
+// 真正的扫描：只在主队列、且不在 UIKit 的布局调用栈里跑。
+// v2.2 是直接在 addSubview / layoutSubviews 的栈里改视图，闪退就是这么来的。
+static void XERunSweep(void) {
+    gXESweepQueued = NO;
+    if (!XEMineCleanWanted()) return;
+
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - gXELastSweep < 0.20) return;   // 限频，别跟着布局循环狂扫
+    gXELastSweep = now;
+
+    UIViewController *top = XETopViewController();
+    if (!top) return;
+    if (!XEVCLooksLikeMine(top, 0)) return;
+
+    gXEMineActive = YES;
+    gXEMinePageClass = NSStringFromClass([top class]);
+    XESweepMineView(top.view, 0);
+    XECaptureMineDump(top);
+}
+
+// 排队：同一时刻只会有一个待执行的扫描
+static void XEScheduleSweep(void) {
+    if (gXESweepQueued) return;
+    gXESweepQueued = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        XERunSweep();
+    });
+}
+
 // 面板里改了开关：清判定缓存并立刻重扫一遍当前页面，不用杀进程
-// （已经摘掉的视图不会自己回来，关开关后重进「我的」页即可恢复）
 static void XERefreshMineClean(void) {
     gXECleanCacheCount = 0;
     gXEMineDump = nil;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *top = XETopViewController();
-        if (top) XESweepMineView(top.view, 0);
-    });
+    gXELastSweep = 0;
+    XEScheduleSweep();
 }
 
 static void xe_addSubview(id self, SEL _cmd, UIView *v);
@@ -968,30 +1040,16 @@ static void (*xe_orig_addSubview)(id, SEL, UIView *);
 static void xe_addSubview(id self, SEL _cmd, UIView *v) {
     xe_orig_addSubview(self, _cmd, v);
     if (!XEMineCleanWanted()) return;
-    if (XEShouldHideView(v, NO)) {
-        XEHideMineBlock(v);
-        return;
-    }
-    // 卡片常见做法：先在自己的容器里组装好，再把整块容器 addSubview 上屏。
-    // 这时容器本身不是命中类名，得往下挖一层，但只在「我的」页上做，控制开销。
-    if (gXEMineActive && v.subviews.count > 0 && v.bounds.size.height > 40) {
-        int budget = 60;
-        XESweepMineRecursive(v, 0, &budget);
-    }
+    // 只排队，绝不在这一步改视图树：addSubview 还在 UIKit 的调用栈里，
+    // 这时候隐藏/收缩视图会把 App 自己的布局循环搞乱（v2.2 的崩溃点）。
+    if (XEShouldHideView(v, NO)) XEScheduleSweep();
 }
 
 static void (*xe_orig_insertSubview)(id, SEL, UIView *, NSInteger);
 static void xe_insertSubview(id self, SEL _cmd, UIView *v, NSInteger index) {
     xe_orig_insertSubview(self, _cmd, v, index);
     if (!XEMineCleanWanted()) return;
-    if (XEShouldHideView(v, NO)) {
-        XEHideMineBlock(v);
-        return;
-    }
-    if (gXEMineActive && v.subviews.count > 0 && v.bounds.size.height > 40) {
-        int budget = 60;
-        XESweepMineRecursive(v, 0, &budget);
-    }
+    if (XEShouldHideView(v, NO)) XEScheduleSweep();
 }
 
 // collection view 里的 cell 是 layout 摆出来的，addSubview 拦不到内部 cell，
@@ -1001,14 +1059,11 @@ static void xe_cvLayoutSubviews(id self, SEL _cmd) {
     xe_orig_cvLayoutSubviews(self, _cmd);
     if (!gXEMineActive || !XEMineCleanWanted()) return;
     for (UICollectionViewCell *c in [(UICollectionView *)self visibleCells]) {
-        if (XEShouldHideView(c, YES)) XEHideMineBlock(c);
+        if (XEShouldHideView(c, YES)) { XEScheduleSweep(); break; }
     }
 }
 
-// 下面两个在「我的」页识别段定义，这里先声明
-static BOOL XEVCLooksLikeMine(UIViewController *vc, int depth);
-static void XECaptureMineDump(UIViewController *top);
-static void XESweepMineView(UIView *v, int depth);
+// 上面三个在「我的」页识别段实现，声明见调度器之前
 
 // 切到「我的」页时卡片是在 viewDidAppear 前后才铺完的，只靠 0.5s 探针会先闪一下。
 // 这里在页面出现时补打一次，延迟 0.15s 等布局落定（layout 没跑完时拿到的尺寸不可信，
@@ -1019,13 +1074,12 @@ static void xe_viewDidAppear(id self, SEL _cmd, BOOL animated) {
     if (!XEMineCleanWanted()) return;
     if (!XEVCLooksLikeMine(self, 0)) return;
 
-    UIViewController *vc = (UIViewController *)self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+    gXEMineActive = YES;
+    gXEMinePageClass = NSStringFromClass([self class]);
+    // 让这一帧的布局先落定，再排队扫描（不在 viewDidAppear 的栈里改树）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        gXEMineActive = YES;
-        gXEMinePageClass = NSStringFromClass([vc class]);
-        XESweepMineView(vc.view, 0);
-        XECaptureMineDump(vc);
+        XEScheduleSweep();
     });
 }
 
@@ -1254,11 +1308,9 @@ static void XEProbeTick(void) {
     BOOL isMine = XEVCLooksLikeMine(top, 0);
     gXEMineActive = isMine;
 
-    if (isMine) gXEMinePageClass = cls;
-    if (isMine && XEMineCleanWanted()) {
-        // 每 0.5s 补一遍：服务端配置回来的板块是异步加的，只靠 addSubview 会漏
-        XESweepMineView(top.view, 0);
-        XECaptureMineDump(top);
+    if (isMine) {
+        gXEMinePageClass = cls;
+        if (XEMineCleanWanted()) XEScheduleSweep();
     }
 }
 
@@ -1518,6 +1570,7 @@ static NSString *XEDiagValue(NSString *kind) {
         return [NSString stringWithFormat:@"%ld 次", gXESettingsHits];
     }
     if ([kind isEqualToString:@"mine"]) {
+        if (gXEMineDisabledByCrash) return @"已自动停用";
         return [NSString stringWithFormat:@"%ld 块", gXEMineHidden];
     }
     if ([kind isEqualToString:@"minepage"]) {
@@ -1560,6 +1613,7 @@ static NSString *XEDiagReport(void) {
 __attribute__((constructor)) static void XEInitialize(void) {
     @autoreleasepool {
         XEReloadPrefs();
+        XECrashGuardBegin();
 
         XEHookEntry hooks[] = {
             // 出价池
