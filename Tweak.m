@@ -604,23 +604,28 @@ static double (*xe_orig_rowHeight)(id, SEL, UITableView *, NSIndexPath *);
 static BOOL (*xe_orig_canEditRow)(id, SEL, UITableView *, NSIndexPath *);
 static id (*xe_orig_swipeActions)(id, SEL, UITableView *, NSIndexPath *);
 
-#define XE_ENTRY_SECTION 0
 #define XE_ENTRY_TITLE @"迅雷增强"
+
+// 追加到设置的「最后一段」末尾，视觉上就是列表最后一行
+static NSInteger XEEntrySection(UITableView *tv) {
+    NSInteger n = (NSInteger)[tv numberOfSections];
+    return n > 0 ? n - 1 : 0;
+}
 
 static NSInteger XEAppRowCount(id self, UITableView *tv) {
     if (!xe_orig_rowCount) return 0;
     return xe_orig_rowCount(self, @selector(tableView:numberOfRowsInSection:),
-                            tv, XE_ENTRY_SECTION);
+                            tv, XEEntrySection(tv));
 }
 
 static BOOL XEIsEntryRow(id self, UITableView *tv, NSIndexPath *ip) {
-    if (!ip || ip.section != XE_ENTRY_SECTION) return NO;
+    if (!ip || ip.section != XEEntrySection(tv)) return NO;
     return ip.row == XEAppRowCount(self, tv);
 }
 
 static NSInteger xe_rowCount(id self, SEL _cmd, UITableView *tv, NSInteger section) {
     NSInteger n = xe_orig_rowCount(self, _cmd, tv, section);
-    return (section == XE_ENTRY_SECTION) ? n + 1 : n;
+    return (section == XEEntrySection(tv)) ? n + 1 : n;
 }
 
 static UITableViewCell *xe_cellForRow(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
@@ -650,10 +655,11 @@ static void xe_didSelectRow(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip)
 
 static double xe_rowHeight(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
     if (!XEIsEntryRow(self, tv, ip)) return xe_orig_rowHeight(self, _cmd, tv, ip);
-    double h = 0;
-    if (xe_orig_rowHeight) {
-        h = xe_orig_rowHeight(self, _cmd, tv, [NSIndexPath indexPathForRow:0 inSection:0]);
-    }
+    NSInteger sec = XEEntrySection(tv);
+    NSInteger rows = xe_orig_rowCount(self, @selector(tableView:numberOfRowsInSection:), tv, sec);
+    if (rows <= 0) return 54;   // 空段别去问原实现，免得索引越界
+    double h = xe_orig_rowHeight(self, _cmd, tv,
+                                [NSIndexPath indexPathForRow:0 inSection:sec]);
     // -1 是 UITableViewAutomaticDimension，说明按约束自适应，给个固定值更稳
     if (!(h > 30) || h > 100) h = 54;
     return h;

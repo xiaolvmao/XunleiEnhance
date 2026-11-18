@@ -92,7 +92,7 @@ make package FINALPACKAGE=1
 
 | 方法 | 我们的处理 |
 | --- | --- |
-| `tableView:numberOfRowsInSection:` | 第 0 段 +1 |
+| `tableView:numberOfRowsInSection:` | 最后一段 +1（读 `[tableView numberOfSections]` 动态取） |
 | `tableView:cellForRowAtIndexPath:` | 该行返回自建 cell（`迅雷增强 / 去广告 ›`） |
 | `tableView:didSelectRowAtIndexPath:` | 该行 push 插件面板 |
 | `tableView:heightForRowAtIndexPath:` | 该行复用首行高度 |
