@@ -212,6 +212,13 @@ static void XEPrefsChanged(CFNotificationCenterRef center, void *observer, CFStr
 #pragma mark - 开屏广告（自渲染）
 // XC 自渲染开屏（ZY 系 VC）：出现后立刻关闭。
 // 用 performSelector:afterDelay: 而不是 block，避免 __weak 在 ObjC++ 下的类型转换问题。
+// 这两个类需要真实声明（Logos 只生成 @class 前向声明，无法向 self 发消息）。
+
+@interface ZYMixSplashViewController : UIViewController
+@end
+
+@interface ZYCustomizeSplashViewController : UIViewController
+@end
 
 %hook ZYMixSplashViewController
 - (void)xe_closeSplashAd {

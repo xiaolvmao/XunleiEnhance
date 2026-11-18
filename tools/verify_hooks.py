@@ -68,6 +68,9 @@ def main():
             continue
         methods = info["methods"]
         for sel in sels:
+            if sel.startswith("xe_"):
+                print("  + %s %s   (插件自建方法)" % (cls, sel))
+                continue
             if sel in methods:
                 print("  ✓ %s %s" % (cls, sel))
                 ok += 1
